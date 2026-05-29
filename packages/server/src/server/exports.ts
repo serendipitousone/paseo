@@ -50,10 +50,12 @@ export {
 
 // Paseo Agent (ChatGPT/Codex) OAuth login + Paseo-owned credential store
 export {
+  loginCodexBrowser,
   loginAndStoreCodexBrowser,
   loginAndStoreCodex,
   paseoAgentAuthStoragePath,
   type CodexDeviceCodeInfo,
+  type StoredCodexOAuthCredential,
 } from "./agent/providers/paseo-agent/oauth-store.js";
 
 // Provider binary resolution

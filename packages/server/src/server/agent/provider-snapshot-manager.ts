@@ -134,7 +134,7 @@ export class ProviderSnapshotManager {
   private runtimeSettings: AgentProviderRuntimeSettingsMap | undefined;
   private providerOverrides: Record<string, ProviderOverride> | undefined;
   private readonly baseProviderOverrides: Record<string, ProviderOverride> | undefined;
-  private readonly paseoAgentConfig: PaseoAgentConfig | undefined;
+  private paseoAgentConfig: PaseoAgentConfig | undefined;
   private providerRegistry: Record<AgentProvider, ProviderDefinition>;
   private providerClients: Record<AgentProvider, AgentClient>;
 
@@ -355,16 +355,12 @@ export class ProviderSnapshotManager {
       this.baseProviderOverrides,
       mutableProviders,
     );
-    this.providerRegistry = this.buildRegistry();
-    this.providerClients = { ...this.extraClients } as Record<AgentProvider, AgentClient>;
+    return this.rebuildRegistryAndReconcileSnapshots();
+  }
 
-    for (const cwd of this.snapshots.keys()) {
-      this.providerLoads.delete(cwd);
-      this.snapshots.set(cwd, this.reconcileSnapshotForRegistry(cwd));
-      this.emitChange(cwd);
-    }
-
-    return this.getAgentManagerProviderState();
+  applyPaseoAgentConfig(config: PaseoAgentConfig | undefined): AgentManagerProviderState {
+    this.paseoAgentConfig = config;
+    return this.rebuildRegistryAndReconcileSnapshots();
   }
 
   on(event: "change", listener: ProviderSnapshotChangeListener): this {
@@ -422,6 +418,19 @@ export class ProviderSnapshotManager {
     }
 
     return registry;
+  }
+
+  private rebuildRegistryAndReconcileSnapshots(): AgentManagerProviderState {
+    this.providerRegistry = this.buildRegistry();
+    this.providerClients = { ...this.extraClients } as Record<AgentProvider, AgentClient>;
+
+    for (const cwd of this.snapshots.keys()) {
+      this.providerLoads.delete(cwd);
+      this.snapshots.set(cwd, this.reconcileSnapshotForRegistry(cwd));
+      this.emitChange(cwd);
+    }
+
+    return this.getAgentManagerProviderState();
   }
 
   private resolveParent(parent: ManagedAgent): AgentCreateConfigParent {

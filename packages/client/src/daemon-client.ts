@@ -88,7 +88,16 @@ import type {
   AgentProvider,
   AgentSessionConfig,
 } from "@getpaseo/protocol/agent-types";
-import type { MutableDaemonConfig, MutableDaemonConfigPatch } from "@getpaseo/protocol/messages";
+import type {
+  MutableDaemonConfig,
+  MutableDaemonConfigPatch,
+  PaseoAgentGetProvidersResponse,
+  PaseoAgentOAuthCredential,
+  PaseoAgentRemoveProviderResponse,
+  PaseoAgentSetProviderRequest,
+  PaseoAgentSetProviderResponse,
+  PaseoAgentStoreChatGptCredentialResponse,
+} from "@getpaseo/protocol/messages";
 import { isRelayClientWebSocketUrl } from "@getpaseo/protocol/daemon-endpoints";
 import { terminalSubscriptionKey } from "@getpaseo/protocol/terminal-subscription-key";
 import {
@@ -3636,6 +3645,63 @@ export class DaemonClient {
       },
       responseType: "set_daemon_config_response",
       timeout: 10000,
+    });
+  }
+
+  async getPaseoAgentProviders(
+    requestId?: string,
+  ): Promise<PaseoAgentGetProvidersResponse["payload"]> {
+    return this.sendNamespacedCorrelatedSessionRequest({
+      requestId,
+      message: {
+        type: "config.paseo_agent.get_providers.request",
+      },
+      timeout: 10000,
+    });
+  }
+
+  async setPaseoAgentProvider(
+    input: Omit<PaseoAgentSetProviderRequest, "type" | "requestId"> & { requestId?: string },
+  ): Promise<PaseoAgentSetProviderResponse["payload"]> {
+    return this.sendNamespacedCorrelatedSessionRequest({
+      requestId: input.requestId,
+      message: {
+        type: "config.paseo_agent.set_provider.request",
+        name: input.name,
+        providerType: input.providerType,
+        options: input.options,
+      },
+      timeout: 30000,
+    });
+  }
+
+  async removePaseoAgentProvider(
+    name: string,
+    requestId?: string,
+  ): Promise<PaseoAgentRemoveProviderResponse["payload"]> {
+    return this.sendNamespacedCorrelatedSessionRequest({
+      requestId,
+      message: {
+        type: "config.paseo_agent.remove_provider.request",
+        name,
+      },
+      timeout: 30000,
+    });
+  }
+
+  async storePaseoAgentChatGptCredential(input: {
+    providerName: string;
+    credential: PaseoAgentOAuthCredential;
+    requestId?: string;
+  }): Promise<PaseoAgentStoreChatGptCredentialResponse["payload"]> {
+    return this.sendNamespacedCorrelatedSessionRequest({
+      requestId: input.requestId,
+      message: {
+        type: "config.paseo_agent.store_chatgpt_credential.request",
+        providerName: input.providerName,
+        credential: input.credential,
+      },
+      timeout: 30000,
     });
   }
 

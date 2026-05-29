@@ -62,6 +62,22 @@ function isEqualValue(a: unknown, b: unknown): boolean {
   return JSON.stringify(a) === JSON.stringify(b);
 }
 
+function stripDedicatedPaseoAgentConfig<T extends Record<string, unknown>>(config: T): T {
+  const agents = config.agents;
+  if (!isRecord(agents) || !Object.prototype.hasOwnProperty.call(agents, "paseo")) {
+    return config;
+  }
+
+  const { paseo: _paseo, ...remainingAgents } = agents;
+  const next: Record<string, unknown> = { ...config };
+  if (Object.keys(remainingAgents).length > 0) {
+    next.agents = remainingAgents;
+  } else {
+    delete next.agents;
+  }
+  return next as T;
+}
+
 export function applyMutableProviderConfigToOverrides(
   baseOverrides: Record<string, ProviderOverride> | undefined,
   mutableProviders: MutableDaemonConfig["providers"] | undefined,
@@ -91,7 +107,7 @@ export class DaemonConfigStore {
   constructor(paseoHome: string, initial: MutableDaemonConfig, logger?: LoggerLike) {
     this.paseoHome = paseoHome;
     this.logger = getLogger(logger);
-    this.current = MutableDaemonConfigSchema.parse(initial);
+    this.current = stripDedicatedPaseoAgentConfig(MutableDaemonConfigSchema.parse(initial));
   }
 
   public get(): MutableDaemonConfig {
@@ -99,8 +115,12 @@ export class DaemonConfigStore {
   }
 
   public patch(partial: MutableDaemonConfigPatch): MutableDaemonConfig {
-    const parsedPatch = MutableDaemonConfigPatchSchema.parse(partial);
-    const next = MutableDaemonConfigSchema.parse(deepMerge(this.current, parsedPatch));
+    const parsedPatch = stripDedicatedPaseoAgentConfig(
+      MutableDaemonConfigPatchSchema.parse(partial),
+    );
+    const next = stripDedicatedPaseoAgentConfig(
+      MutableDaemonConfigSchema.parse(deepMerge(this.current, parsedPatch)),
+    );
 
     const changedFieldPaths = Array.from(this.fieldChangeHandlers.keys()).filter((path) => {
       return !isEqualValue(getValueAtPath(this.current, path), getValueAtPath(next, path));

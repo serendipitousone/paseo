@@ -1836,6 +1836,112 @@ export const ListProviderFeaturesRequestMessageSchema = z.object({
   requestId: z.string(),
 });
 
+const PaseoAgentProviderTypeSchema = z.enum([
+  "openrouter",
+  "openai",
+  "anthropic",
+  "opencode",
+  "openai-compatible",
+  "openai-codex",
+  "custom",
+]);
+
+const PaseoAgentProviderModelConfigSchema = z
+  .object({
+    id: z.string().min(1),
+    label: z.string().min(1).optional(),
+    api: z.string().min(1).optional(),
+    reasoning: z.boolean().optional(),
+    contextWindow: z.number().int().positive().optional(),
+    maxTokens: z.number().int().positive().optional(),
+  })
+  .strict();
+
+const PaseoAgentSetProviderOptionsSchema = z
+  .object({
+    apiKey: z.string().min(1).optional(),
+    baseUrl: z.string().url().optional(),
+    api: z.string().min(1).optional(),
+    headers: z.record(z.string()).optional(),
+    authHeader: z.boolean().optional(),
+    models: z.array(PaseoAgentProviderModelConfigSchema).min(1),
+  })
+  .strict();
+
+const PaseoAgentOAuthCredentialSchema = z
+  .object({
+    type: z.literal("oauth"),
+    access: z.string(),
+    refresh: z.string(),
+    expires: z.number(),
+    accountId: z.string().min(1).optional(),
+  })
+  .passthrough();
+
+export const PaseoAgentProviderAuthStateSchema = z
+  .object({
+    kind: z.enum(["api_key", "oauth", "none"]),
+    configured: z.boolean(),
+    source: z
+      .enum(["literal", "env", "default_env", "command", "stored", "refresh_token"])
+      .optional(),
+    hint: z.string().optional(),
+  })
+  .strict();
+
+export const RedactedPaseoAgentProviderConfigSchema = z
+  .object({
+    name: z.string().min(1),
+    providerType: z.enum([
+      "openrouter",
+      "openai",
+      "anthropic",
+      "opencode",
+      "openai-compatible",
+      "openai-codex",
+      "custom",
+    ]),
+    baseUrl: z.string().optional(),
+    api: z.string().optional(),
+    models: z.array(PaseoAgentProviderModelConfigSchema),
+    auth: PaseoAgentProviderAuthStateSchema,
+    available: z.boolean(),
+    error: z.string().nullable().optional(),
+  })
+  .strict();
+
+export const PaseoAgentGetProvidersRequestSchema = z.object({
+  type: z.literal("config.paseo_agent.get_providers.request"),
+  requestId: z.string(),
+});
+
+export const PaseoAgentSetProviderRequestSchema = z.object({
+  type: z.literal("config.paseo_agent.set_provider.request"),
+  requestId: z.string(),
+  name: z.string().trim().min(1),
+  providerType: PaseoAgentProviderTypeSchema,
+  options: PaseoAgentSetProviderOptionsSchema,
+});
+
+export const PaseoAgentRemoveProviderRequestSchema = z.object({
+  type: z.literal("config.paseo_agent.remove_provider.request"),
+  requestId: z.string(),
+  name: z.string().trim().min(1),
+});
+
+export const PaseoAgentSetDefaultModelRequestSchema = z.object({
+  type: z.literal("config.paseo_agent.set_default_model.request"),
+  requestId: z.string(),
+  model: z.string().trim().min(1).nullable(),
+});
+
+export const PaseoAgentStoreChatGptCredentialRequestSchema = z.object({
+  type: z.literal("config.paseo_agent.store_chatgpt_credential.request"),
+  requestId: z.string(),
+  providerName: z.string().trim().min(1),
+  credential: PaseoAgentOAuthCredentialSchema,
+});
+
 export const ListCommandsRequestSchema = z.object({
   type: z.literal("list_commands_request"),
   agentId: z.string(),
@@ -1984,6 +2090,11 @@ export const SessionInboundMessageSchema = z.discriminatedUnion("type", [
   ListProviderModelsRequestMessageSchema,
   ListProviderModesRequestMessageSchema,
   ListProviderFeaturesRequestMessageSchema,
+  PaseoAgentGetProvidersRequestSchema,
+  PaseoAgentSetProviderRequestSchema,
+  PaseoAgentRemoveProviderRequestSchema,
+  PaseoAgentSetDefaultModelRequestSchema,
+  PaseoAgentStoreChatGptCredentialRequestSchema,
   ListAvailableProvidersRequestMessageSchema,
   GetProvidersSnapshotRequestMessageSchema,
   RefreshProvidersSnapshotRequestMessageSchema,
@@ -2254,6 +2365,8 @@ export const ServerInfoStatusPayloadSchema = z
         checkoutRefresh: z.boolean().optional(),
         // COMPAT(workspaceMultiplicity): added in v0.1.97, drop the gate when floor >= v0.1.97
         workspaceMultiplicity: z.boolean().optional(),
+        // COMPAT(paseoAgentConfig): added in v0.1.85, remove gate after 2026-11-30.
+        paseoAgentConfig: z.boolean().optional(),
       })
       .optional(),
   })
@@ -3723,6 +3836,57 @@ export const ListProviderFeaturesResponseMessageSchema = z.object({
   }),
 });
 
+export const PaseoAgentGetProvidersResponseSchema = z.object({
+  type: z.literal("config.paseo_agent.get_providers.response"),
+  payload: z.object({
+    requestId: z.string(),
+    defaultModel: z.string().nullable(),
+    providers: z.array(RedactedPaseoAgentProviderConfigSchema),
+    error: z.string().nullable(),
+  }),
+});
+
+export const PaseoAgentSetProviderResponseSchema = z.object({
+  type: z.literal("config.paseo_agent.set_provider.response"),
+  payload: z.object({
+    requestId: z.string(),
+    success: z.boolean(),
+    provider: RedactedPaseoAgentProviderConfigSchema.nullable(),
+    error: z.string().nullable(),
+  }),
+});
+
+export const PaseoAgentRemoveProviderResponseSchema = z.object({
+  type: z.literal("config.paseo_agent.remove_provider.response"),
+  payload: z.object({
+    requestId: z.string(),
+    success: z.boolean(),
+    removed: z.boolean(),
+    error: z.string().nullable(),
+  }),
+});
+
+export const PaseoAgentSetDefaultModelResponseSchema = z.object({
+  type: z.literal("config.paseo_agent.set_default_model.response"),
+  payload: z.object({
+    requestId: z.string(),
+    success: z.boolean(),
+    defaultModel: z.string().nullable(),
+    error: z.string().nullable(),
+  }),
+});
+
+export const PaseoAgentStoreChatGptCredentialResponseSchema = z.object({
+  type: z.literal("config.paseo_agent.store_chatgpt_credential.response"),
+  payload: z.object({
+    requestId: z.string(),
+    success: z.boolean(),
+    providerName: z.string(),
+    auth: PaseoAgentProviderAuthStateSchema,
+    error: z.string().nullable(),
+  }),
+});
+
 const ProviderAvailabilitySchema = z.object({
   provider: AgentProviderSchema,
   available: z.boolean(),
@@ -4034,6 +4198,11 @@ export const SessionOutboundMessageSchema = z.discriminatedUnion("type", [
   ListProviderModelsResponseMessageSchema,
   ListProviderModesResponseMessageSchema,
   ListProviderFeaturesResponseMessageSchema,
+  PaseoAgentGetProvidersResponseSchema,
+  PaseoAgentSetProviderResponseSchema,
+  PaseoAgentRemoveProviderResponseSchema,
+  PaseoAgentSetDefaultModelResponseSchema,
+  PaseoAgentStoreChatGptCredentialResponseSchema,
   ListAvailableProvidersResponseSchema,
   GetProvidersSnapshotResponseMessageSchema,
   ProvidersSnapshotUpdateMessageSchema,
@@ -4158,6 +4327,22 @@ export type ListProviderModesResponseMessage = z.infer<
 export type ListProviderFeaturesResponseMessage = z.infer<
   typeof ListProviderFeaturesResponseMessageSchema
 >;
+export type RedactedPaseoAgentProviderConfig = z.infer<
+  typeof RedactedPaseoAgentProviderConfigSchema
+>;
+export type PaseoAgentProviderAuthState = z.infer<typeof PaseoAgentProviderAuthStateSchema>;
+export type PaseoAgentOAuthCredential = z.infer<typeof PaseoAgentOAuthCredentialSchema>;
+export type PaseoAgentGetProvidersResponse = z.infer<typeof PaseoAgentGetProvidersResponseSchema>;
+export type PaseoAgentSetProviderResponse = z.infer<typeof PaseoAgentSetProviderResponseSchema>;
+export type PaseoAgentRemoveProviderResponse = z.infer<
+  typeof PaseoAgentRemoveProviderResponseSchema
+>;
+export type PaseoAgentSetDefaultModelResponse = z.infer<
+  typeof PaseoAgentSetDefaultModelResponseSchema
+>;
+export type PaseoAgentStoreChatGptCredentialResponse = z.infer<
+  typeof PaseoAgentStoreChatGptCredentialResponseSchema
+>;
 export type ListAvailableProvidersResponse = z.infer<typeof ListAvailableProvidersResponseSchema>;
 export type DaemonGetStatusResponse = z.infer<typeof DaemonGetStatusResponseSchema>;
 export type DaemonGetPairingOfferResponse = z.infer<typeof DaemonGetPairingOfferResponseSchema>;
@@ -4222,6 +4407,15 @@ export type ListProviderModelsRequestMessage = z.infer<
 export type ListProviderModesRequestMessage = z.infer<typeof ListProviderModesRequestMessageSchema>;
 export type ListProviderFeaturesRequestMessage = z.infer<
   typeof ListProviderFeaturesRequestMessageSchema
+>;
+export type PaseoAgentGetProvidersRequest = z.infer<typeof PaseoAgentGetProvidersRequestSchema>;
+export type PaseoAgentSetProviderRequest = z.infer<typeof PaseoAgentSetProviderRequestSchema>;
+export type PaseoAgentRemoveProviderRequest = z.infer<typeof PaseoAgentRemoveProviderRequestSchema>;
+export type PaseoAgentSetDefaultModelRequest = z.infer<
+  typeof PaseoAgentSetDefaultModelRequestSchema
+>;
+export type PaseoAgentStoreChatGptCredentialRequest = z.infer<
+  typeof PaseoAgentStoreChatGptCredentialRequestSchema
 >;
 export type ListAvailableProvidersRequestMessage = z.infer<
   typeof ListAvailableProvidersRequestMessageSchema

@@ -4,7 +4,8 @@ Paseo Agent is a built-in provider that runs Pi's coding-agent harness **in proc
 
 The provider id is **`paseo`** (the display name is "Paseo Agent"). Use it like any other provider, e.g. `paseo run --provider paseo --model <inferenceProviderName>/<modelId> ...`.
 
-This is a prototype. There is no UI yet — config-file only.
+This is a prototype. There is no app UI yet. OpenRouter and ChatGPT setup have CLI
+paths; other provider setup is still config-file based.
 
 > Smoke note: the daemon supervisor runs from `packages/server/dist`. After changing
 > provider/config code, run `npm run build:server` (or run a source/dev daemon) before
@@ -184,3 +185,30 @@ normal path is `paseo login chatgpt`. Paseo still never reads another tool's aut
 
 Other OAuth providers (Anthropic Pro/Max, Copilot) remain unwired; for those you can pass a
 pre-obtained bearer token via `apiKey`/env where accepted (e.g. `ANTHROPIC_OAUTH_TOKEN`).
+
+## CLI setup
+
+Configure an OpenRouter provider through the selected daemon:
+
+```bash
+export OPENROUTER_API_KEY=...
+paseo provider add openrouter openrouter-main \
+  --model anthropic/claude-3.7-sonnet \
+  --host localhost:7777
+```
+
+For shell-history-safe key entry, pipe the key instead:
+
+```bash
+printf '%s\n' "$OPENROUTER_API_KEY" |
+  paseo provider add openrouter openrouter-main \
+    --api-key-stdin \
+    --model anthropic/claude-3.7-sonnet \
+    --host localhost:7777
+```
+
+`paseo login chatgpt --host <host>` runs browser OAuth on the CLI machine, then sends
+the returned credential to the selected daemon. The credential is stored in that daemon's
+`$PASEO_HOME/paseo-agent/auth.json`; token values are not printed. `--device-code` is
+currently local-only and is rejected when combined with `--host` until a daemon-run
+device-code RPC exists.

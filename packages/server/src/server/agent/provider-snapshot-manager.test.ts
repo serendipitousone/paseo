@@ -683,6 +683,46 @@ describe("ProviderSnapshotManager applyMutableProviderConfig", () => {
   });
 });
 
+describe("ProviderSnapshotManager applyPaseoAgentConfig", () => {
+  test("refreshes Paseo Agent models without daemon restart", async () => {
+    const manager = new ProviderSnapshotManager({
+      logger: createTestLogger(),
+      providerOverrides: {
+        claude: { enabled: false },
+        codex: { enabled: false },
+        copilot: { enabled: false },
+        opencode: { enabled: false },
+        pi: { enabled: false },
+      },
+      paseoAgentConfig: {},
+    });
+    try {
+      manager.applyPaseoAgentConfig({
+        providers: {
+          "openrouter-main": {
+            type: "openrouter",
+            options: {
+              apiKey: "sk-test",
+              models: [{ id: "anthropic/claude-3.7-sonnet", label: "Claude" }],
+            },
+          },
+        },
+      });
+
+      const models = await manager.listModels({ provider: "paseo", wait: true });
+      expect(models).toEqual([
+        expect.objectContaining({
+          provider: "paseo",
+          id: "openrouter-main/anthropic/claude-3.7-sonnet",
+          label: "Claude",
+        }),
+      ]);
+    } finally {
+      manager.destroy();
+    }
+  });
+});
+
 describe("ProviderSnapshotManager lifecycle", () => {
   test("on/off attaches and detaches change listeners", () => {
     const manager = new ProviderSnapshotManager({

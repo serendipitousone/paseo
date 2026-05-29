@@ -4,9 +4,9 @@ import { createCli } from "../../cli.js";
 import { createLoginCommand } from "./index.js";
 
 interface RecordedLogin {
-  providerInstance: string;
-  envHome: string | undefined;
   mode: "browser" | "device";
+  providerInstance?: string;
+  envHome?: string | undefined;
 }
 
 describe("paseo login command", () => {
@@ -24,13 +24,15 @@ describe("paseo login command", () => {
     const flags = chatgpt?.options.map((option) => option.long);
     // Default flow is browser; device-code is an opt-in fallback.
     expect(flags).toContain("--device-code");
+    expect(flags).toContain("--host");
     expect(flags).toContain("--home");
     // It must not require a copy/paste device flow by default.
     expect(chatgpt?.description().toLowerCase()).toContain("chatgpt");
   });
 
-  it("runs browser login by default and opens the Pi auth URL", async () => {
+  it("runs browser login by default and stores the credential through the daemon", async () => {
     const recorded: RecordedLogin[] = [];
+    const stored: unknown[] = [];
     const openedUrls: string[] = [];
     const output: string[] = [];
 
@@ -44,29 +46,57 @@ describe("paseo login command", () => {
       promptForCode: async () => {
         throw new Error("manual code prompt should not be used for successful browser login");
       },
-      loginBrowser: async (options) => {
-        recorded.push({
-          providerInstance: options.providerInstance,
-          envHome: options.env?.PASEO_HOME,
-          mode: "browser",
-        });
+      loginBrowserCredential: async (options) => {
+        recorded.push({ mode: "browser" });
         options.onAuthUrl("https://auth.openai.com/oauth/authorize?client_id=paseo");
         options.onProgress?.("callback complete");
-        return { path: "/tmp/paseo-home/paseo-agent/auth.json" };
+        return { type: "oauth", access: "access-token", refresh: "refresh-token", expires: 123 };
+      },
+      connectDaemon: async (options) => {
+        expect(options.host).toBe("localhost:7777");
+        return {
+          getLastServerInfoMessage: () => ({
+            status: "server_info",
+            serverId: "test-daemon",
+            features: { paseoAgentConfig: true },
+          }),
+          storePaseoAgentChatGptCredential: async (input) => {
+            stored.push(input);
+            return {
+              requestId: "request-1",
+              success: true,
+              providerName: input.providerName,
+              auth: { kind: "oauth", configured: true, source: "stored" },
+              error: null,
+            };
+          },
+          close: async () => {},
+        };
       },
       loginDeviceCode: async () => {
         throw new Error("device-code login should not be used by default");
       },
     });
 
-    await login.parseAsync(["node", "login", "chatgpt", "--home", "/tmp/paseo-home"]);
+    await login.parseAsync(["node", "login", "chatgpt", "--host", "localhost:7777"]);
 
-    expect(recorded).toEqual([
-      { providerInstance: "chatgpt", envHome: "/tmp/paseo-home", mode: "browser" },
+    expect(recorded).toEqual([{ mode: "browser" }]);
+    expect(stored).toEqual([
+      {
+        providerName: "chatgpt",
+        credential: {
+          type: "oauth",
+          access: "access-token",
+          refresh: "refresh-token",
+          expires: 123,
+        },
+      },
     ]);
     expect(openedUrls).toEqual(["https://auth.openai.com/oauth/authorize?client_id=paseo"]);
     expect(output.join("\n")).toContain("browser flow");
-    expect(output.join("\n")).toContain("/tmp/paseo-home/paseo-agent/auth.json");
+    expect(output.join("\n")).toContain("selected daemon (localhost:7777)");
+    expect(output.join("\n")).not.toContain("access-token");
+    expect(output.join("\n")).not.toContain("refresh-token");
   });
 
   it("uses device-code login only when explicitly requested", async () => {
@@ -82,8 +112,11 @@ describe("paseo login command", () => {
       promptForCode: async () => {
         throw new Error("manual browser prompt should not run for --device-code");
       },
-      loginBrowser: async () => {
+      loginBrowserCredential: async () => {
         throw new Error("browser login should not run for --device-code");
+      },
+      connectDaemon: async () => {
+        throw new Error("daemon client should not be used for local --device-code");
       },
       loginDeviceCode: async (options) => {
         recorded.push({
@@ -115,5 +148,117 @@ describe("paseo login command", () => {
     ]);
     expect(output.join("\n")).toContain("headless device-code flow");
     expect(output.join("\n")).toContain("ABCD-EFGH");
+  });
+
+  it("rejects --device-code with --host instead of writing local auth for a remote host", async () => {
+    const output: string[] = [];
+    const login = createLoginCommand({
+      write: (message) => output.push(message),
+      writeError: (message) => output.push(message),
+      openBrowser: () => {
+        throw new Error("browser opener should not run");
+      },
+      promptForCode: async () => {
+        throw new Error("prompt should not run");
+      },
+      loginBrowserCredential: async () => {
+        throw new Error("browser login should not run");
+      },
+      loginDeviceCode: async () => {
+        throw new Error("device-code login should not run with --host");
+      },
+      connectDaemon: async () => {
+        throw new Error("daemon client should not be used");
+      },
+    });
+
+    await login.parseAsync(["node", "login", "chatgpt", "--device-code", "--host", "remote:7777"]);
+
+    expect(output.join("\n")).toContain("--device-code cannot be combined with --host");
+  });
+
+  it("asks for a host update instead of sending credentials to an old daemon", async () => {
+    const stored: unknown[] = [];
+    const output: string[] = [];
+    const login = createLoginCommand({
+      write: (message) => output.push(message),
+      writeError: (message) => output.push(message),
+      openBrowser: () => {
+        throw new Error("browser opener should not run without the capability flag");
+      },
+      promptForCode: async () => {
+        throw new Error("manual code prompt should not be used");
+      },
+      loginBrowserCredential: async () => {
+        throw new Error("browser login should not run without the capability flag");
+      },
+      connectDaemon: async () => ({
+        getLastServerInfoMessage: () => ({
+          status: "server_info",
+          serverId: "test-daemon",
+          features: {},
+        }),
+        storePaseoAgentChatGptCredential: async (input) => {
+          stored.push(input);
+          throw new Error("store RPC should not be called without the capability flag");
+        },
+        close: async () => {},
+      }),
+      loginDeviceCode: async () => {
+        throw new Error("device-code login should not run");
+      },
+    });
+
+    await login.parseAsync(["node", "login", "chatgpt", "--host", "remote:7777"]);
+
+    expect(stored).toEqual([]);
+    expect(output.join("\n")).toContain("Update the host to configure Paseo Agent providers.");
+  });
+
+  it("does not echo password-bearing host URIs after remote login", async () => {
+    const output: string[] = [];
+    const login = createLoginCommand({
+      write: (message) => output.push(message),
+      writeError: (message) => output.push(message),
+      openBrowser: () => true,
+      promptForCode: async () => {
+        throw new Error("manual code prompt should not be used");
+      },
+      loginBrowserCredential: async () => ({
+        type: "oauth",
+        access: "access-token",
+        refresh: "refresh-token",
+        expires: 123,
+      }),
+      connectDaemon: async () => ({
+        getLastServerInfoMessage: () => ({
+          status: "server_info",
+          serverId: "test-daemon",
+          features: { paseoAgentConfig: true },
+        }),
+        storePaseoAgentChatGptCredential: async (input) => ({
+          requestId: "request-1",
+          success: true,
+          providerName: input.providerName,
+          auth: { kind: "oauth", configured: true, source: "stored" },
+          error: null,
+        }),
+        close: async () => {},
+      }),
+      loginDeviceCode: async () => {
+        throw new Error("device-code login should not run");
+      },
+    });
+
+    await login.parseAsync([
+      "node",
+      "login",
+      "chatgpt",
+      "--host",
+      "tcp://remote:7777?ssl=true&password=super-secret",
+    ]);
+
+    expect(output.join("\n")).toContain("tcp://remote:7777?ssl=true");
+    expect(output.join("\n")).not.toContain("super-secret");
   });
 });

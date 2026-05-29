@@ -97,6 +97,7 @@ import type {
 
 import { AgentManager } from "./agent/agent-manager.js";
 import { ProviderSnapshotManager, resolveSnapshotCwd } from "./agent/provider-snapshot-manager.js";
+import { PaseoAgentConfigService } from "./agent/providers/paseo-agent/config-service.js";
 import type {
   AgentManagerEvent,
   AgentTimelineCursor,
@@ -2205,6 +2206,16 @@ export class Session {
         return this.handleListProviderModesRequest(msg);
       case "list_provider_features_request":
         return this.handleListProviderFeaturesRequest(msg);
+      case "config.paseo_agent.get_providers.request":
+        return this.handlePaseoAgentGetProvidersRequest(msg);
+      case "config.paseo_agent.set_provider.request":
+        return this.handlePaseoAgentSetProviderRequest(msg);
+      case "config.paseo_agent.remove_provider.request":
+        return this.handlePaseoAgentRemoveProviderRequest(msg);
+      case "config.paseo_agent.set_default_model.request":
+        return this.handlePaseoAgentSetDefaultModelRequest(msg);
+      case "config.paseo_agent.store_chatgpt_credential.request":
+        return this.handlePaseoAgentStoreChatGptCredentialRequest(msg);
       case "list_available_providers_request":
         return this.handleListAvailableProvidersRequest(msg);
       case "get_providers_snapshot_request":
@@ -4001,6 +4012,183 @@ export class Session {
           error: getErrorMessage(error),
           fetchedAt,
           requestId: msg.requestId,
+        },
+      });
+    }
+  }
+
+  private createPaseoAgentConfigService(): PaseoAgentConfigService {
+    return new PaseoAgentConfigService({
+      paseoHome: this.paseoHome,
+      logger: this.sessionLogger,
+      onConfigChanged: (config) => {
+        const state = this.providerSnapshotManager.applyPaseoAgentConfig(config);
+        this.agentManager.updateProviderRegistry(state);
+      },
+    });
+  }
+
+  private async refreshPaseoAgentRuntimeSnapshot(): Promise<void> {
+    await this.providerSnapshotManager.refreshSettingsSnapshot({ providers: ["paseo"] });
+  }
+
+  private async handlePaseoAgentGetProvidersRequest(
+    msg: Extract<SessionInboundMessage, { type: "config.paseo_agent.get_providers.request" }>,
+  ): Promise<void> {
+    try {
+      const result = this.createPaseoAgentConfigService().getProviders();
+      this.emit({
+        type: "config.paseo_agent.get_providers.response",
+        payload: {
+          requestId: msg.requestId,
+          defaultModel: result.defaultModel,
+          providers: result.providers,
+          error: null,
+        },
+      });
+    } catch (error) {
+      this.sessionLogger.error({ err: error }, "Failed to read Paseo Agent providers");
+      this.emit({
+        type: "config.paseo_agent.get_providers.response",
+        payload: {
+          requestId: msg.requestId,
+          defaultModel: null,
+          providers: [],
+          error: getErrorMessage(error),
+        },
+      });
+    }
+  }
+
+  private async handlePaseoAgentSetProviderRequest(
+    msg: Extract<SessionInboundMessage, { type: "config.paseo_agent.set_provider.request" }>,
+  ): Promise<void> {
+    try {
+      const provider = this.createPaseoAgentConfigService().setProvider({
+        name: msg.name,
+        providerType: msg.providerType,
+        options: msg.options,
+      });
+      await this.refreshPaseoAgentRuntimeSnapshot();
+      this.emit({
+        type: "config.paseo_agent.set_provider.response",
+        payload: {
+          requestId: msg.requestId,
+          success: true,
+          provider,
+          error: null,
+        },
+      });
+    } catch (error) {
+      this.sessionLogger.error(
+        { err: error, providerName: msg.name, providerType: msg.providerType },
+        "Failed to set Paseo Agent provider",
+      );
+      this.emit({
+        type: "config.paseo_agent.set_provider.response",
+        payload: {
+          requestId: msg.requestId,
+          success: false,
+          provider: null,
+          error: getErrorMessage(error),
+        },
+      });
+    }
+  }
+
+  private async handlePaseoAgentRemoveProviderRequest(
+    msg: Extract<SessionInboundMessage, { type: "config.paseo_agent.remove_provider.request" }>,
+  ): Promise<void> {
+    try {
+      const removed = this.createPaseoAgentConfigService().removeProvider(msg.name);
+      await this.refreshPaseoAgentRuntimeSnapshot();
+      this.emit({
+        type: "config.paseo_agent.remove_provider.response",
+        payload: {
+          requestId: msg.requestId,
+          success: true,
+          removed,
+          error: null,
+        },
+      });
+    } catch (error) {
+      this.sessionLogger.error(
+        { err: error, providerName: msg.name },
+        "Failed to remove Paseo Agent provider",
+      );
+      this.emit({
+        type: "config.paseo_agent.remove_provider.response",
+        payload: {
+          requestId: msg.requestId,
+          success: false,
+          removed: false,
+          error: getErrorMessage(error),
+        },
+      });
+    }
+  }
+
+  private async handlePaseoAgentSetDefaultModelRequest(
+    msg: Extract<SessionInboundMessage, { type: "config.paseo_agent.set_default_model.request" }>,
+  ): Promise<void> {
+    try {
+      const defaultModel = this.createPaseoAgentConfigService().setDefaultModel(msg.model);
+      await this.refreshPaseoAgentRuntimeSnapshot();
+      this.emit({
+        type: "config.paseo_agent.set_default_model.response",
+        payload: {
+          requestId: msg.requestId,
+          success: true,
+          defaultModel,
+          error: null,
+        },
+      });
+    } catch (error) {
+      this.sessionLogger.error({ err: error }, "Failed to set Paseo Agent default model");
+      this.emit({
+        type: "config.paseo_agent.set_default_model.response",
+        payload: {
+          requestId: msg.requestId,
+          success: false,
+          defaultModel: null,
+          error: getErrorMessage(error),
+        },
+      });
+    }
+  }
+
+  private async handlePaseoAgentStoreChatGptCredentialRequest(
+    msg: Extract<
+      SessionInboundMessage,
+      { type: "config.paseo_agent.store_chatgpt_credential.request" }
+    >,
+  ): Promise<void> {
+    try {
+      this.createPaseoAgentConfigService().storeChatGptCredential(msg.providerName, msg.credential);
+      await this.refreshPaseoAgentRuntimeSnapshot();
+      this.emit({
+        type: "config.paseo_agent.store_chatgpt_credential.response",
+        payload: {
+          requestId: msg.requestId,
+          success: true,
+          providerName: msg.providerName,
+          auth: { kind: "oauth", configured: true, source: "stored" },
+          error: null,
+        },
+      });
+    } catch (error) {
+      this.sessionLogger.error(
+        { err: error, providerName: msg.providerName },
+        "Failed to store Paseo Agent ChatGPT credential",
+      );
+      this.emit({
+        type: "config.paseo_agent.store_chatgpt_credential.response",
+        payload: {
+          requestId: msg.requestId,
+          success: false,
+          providerName: msg.providerName,
+          auth: { kind: "oauth", configured: false },
+          error: getErrorMessage(error),
         },
       });
     }

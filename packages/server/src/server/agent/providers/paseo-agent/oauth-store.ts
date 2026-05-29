@@ -30,6 +30,14 @@ type BrowserLogin = (options: {
   onProgress?: (message: string) => void;
 }) => Promise<OAuthCredentials>;
 
+export type StoredCodexOAuthCredential = {
+  type: "oauth";
+  access: string;
+  refresh: string;
+  expires: number;
+  accountId?: string;
+} & Record<string, unknown>;
+
 /** Path to the Paseo-owned auth store. Uses PASEO_HOME; falls back to ~/.paseo. */
 export function paseoAgentAuthStoragePath(env: NodeJS.ProcessEnv = process.env): string {
   const base = env.PASEO_HOME ?? join(homedir(), ".paseo");
@@ -71,6 +79,22 @@ export function hasStoredOAuthCredential(
 }
 
 /**
+ * Store a credential obtained by a remote-safe client-side OAuth flow into the
+ * daemon's Paseo-owned AuthStorage. The caller supplies a stable wire shape, not
+ * Pi types, and this helper never reads or writes foreign auth files.
+ */
+export function storeCodexOAuthCredential(options: {
+  providerInstance: string;
+  credential: StoredCodexOAuthCredential;
+  env?: NodeJS.ProcessEnv;
+}): { path: string } {
+  const path = paseoAgentAuthStoragePath(options.env);
+  const authStorage = AuthStorage.create(path);
+  authStorage.set(options.providerInstance, options.credential);
+  return { path };
+}
+
+/**
  * Run Pi's ChatGPT/Codex device-code OAuth login and persist the resulting credential
  * into the Paseo-owned store under `providerInstance`. The `login` dependency defaults
  * to Pi's helper and is injectable for tests (no network). Never reads foreign files.
@@ -106,6 +130,23 @@ export async function loginAndStoreCodexBrowser(options: {
   env?: NodeJS.ProcessEnv;
   login?: BrowserLogin;
 }): Promise<{ path: string }> {
+  const credential = await loginCodexBrowser(options);
+  const path = paseoAgentAuthStoragePath(options.env);
+  const authStorage = AuthStorage.create(path);
+  authStorage.set(options.providerInstance, credential);
+  return { path };
+}
+
+/**
+ * Run Pi's browser OAuth flow and return the credential without storing it locally.
+ * CLI remote login uses this so the selected daemon remains the owner of persisted auth.
+ */
+export async function loginCodexBrowser(options: {
+  onAuthUrl: (url: string, instructions?: string) => void;
+  promptForCode?: (message: string) => Promise<string>;
+  onProgress?: (message: string) => void;
+  login?: BrowserLogin;
+}): Promise<StoredCodexOAuthCredential> {
   const login = options.login ?? (loginOpenAICodex as BrowserLogin);
   const credentials = await login({
     onAuth: (info) => options.onAuthUrl(info.url, info.instructions),
@@ -117,8 +158,5 @@ export async function loginAndStoreCodexBrowser(options: {
       return options.promptForCode(prompt.message);
     },
   });
-  const path = paseoAgentAuthStoragePath(options.env);
-  const authStorage = AuthStorage.create(path);
-  authStorage.set(options.providerInstance, { type: "oauth", ...credentials });
-  return { path };
+  return { type: "oauth", ...credentials };
 }
