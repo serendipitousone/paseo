@@ -116,6 +116,20 @@ describe("createPaseoAgentSession (no-discovery spike)", () => {
     expect(resourceLoader.getPrompts().prompts).toHaveLength(0);
   });
 
+  it("exposes composed prompts through the resource loader without discovery", async () => {
+    const { resourceLoader } = await createPaseoAgentSession({
+      ...baseOptions(),
+      composedPrompt: {
+        customPrompt: "Custom Paseo base prompt.",
+        appendSystemPrompt: ["Profile append.", "Daemon append."],
+      },
+    });
+
+    expect(resourceLoader.getSystemPrompt()).toBe("Custom Paseo base prompt.");
+    expect(resourceLoader.getAppendSystemPrompt()).toEqual(["Profile append.", "Daemon append."]);
+    expect(resourceLoader.getAgentsFiles().agentsFiles).toHaveLength(0);
+  });
+
   it("uses an in-memory session manager with no on-disk session file", async () => {
     const { sessionManager } = await createPaseoAgentSession(baseOptions());
 

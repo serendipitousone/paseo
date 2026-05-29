@@ -48,6 +48,7 @@ import {
 import { createMcpToolBridge, type McpToolBridge } from "./mcp-bridge.js";
 import { createPaseoAgentAuthStorage, hasStoredOAuthCredential } from "./oauth-store.js";
 import { createPaseoAgentSession, type PaseoAgentSessionHandle } from "./pi-services.js";
+import { composePromptParts, loadPromptProfile } from "./prompt-profiles.js";
 
 const DEFAULT_THINKING_LEVEL: ThinkingLevel = "medium";
 
@@ -85,6 +86,7 @@ function resolveIsolatedAgentDir(): string {
 interface PaseoAgentClientOptions {
   logger: Logger;
   config: PaseoAgentConfig;
+  paseoHome?: string;
 }
 
 export class PaseoAgentSession implements AgentSession {
@@ -492,10 +494,12 @@ export class PaseoAgentClient implements AgentClient {
 
   private readonly logger: Logger;
   private readonly config: PaseoAgentConfig;
+  private readonly paseoHome: string | undefined;
 
   constructor(options: PaseoAgentClientOptions) {
     this.logger = options.logger;
     this.config = options.config;
+    this.paseoHome = options.paseoHome;
   }
 
   async createSession(
@@ -509,10 +513,26 @@ export class PaseoAgentClient implements AgentClient {
       );
     }
 
-    const model = resolvePaseoAgentModel(this.config, config.model, inferenceProviders);
+    const profile = this.loadDefaultProfile();
+    this.verifyExpectedMcpServers(profile?.expectedMcpServers ?? [], config.mcpServers);
+    const model = resolvePaseoAgentModel(
+      this.config,
+      config.model,
+      inferenceProviders,
+      profile?.model,
+    );
     const thinkingLevel = normalizeThinkingLevel(config.thinkingOptionId) ?? undefined;
+    const composedPrompt = composePromptParts({
+      profile,
+      systemPrompt: config.systemPrompt,
+      daemonAppendSystemPrompt: config.daemonAppendSystemPrompt,
+    });
     this.logger.debug(
-      { provider: PASEO_AGENT_PROVIDER, model: model ? `${model.provider}/${model.id}` : null },
+      {
+        provider: PASEO_AGENT_PROVIDER,
+        model: model ? `${model.provider}/${model.id}` : null,
+        promptProfile: profile?.id ?? null,
+      },
       "Creating Paseo Agent session",
     );
 
@@ -536,6 +556,7 @@ export class PaseoAgentClient implements AgentClient {
         ...(thinkingLevel ? { thinkingLevel } : {}),
         ...(authStorage ? { authStorage } : {}),
         ...(mcpBridge.tools.length > 0 ? { customTools: mcpBridge.tools } : {}),
+        ...(composedPrompt ? { composedPrompt } : {}),
       });
       return new PaseoAgentSession(handle, config, mcpBridge);
     } catch (error) {
@@ -556,5 +577,49 @@ export class PaseoAgentClient implements AgentClient {
     return paseoAgentHasUsableModel(this.config, process.env, (providerInstance) =>
       hasStoredOAuthCredential(providerInstance),
     );
+  }
+
+  private loadDefaultProfile() {
+    if (!this.paseoHome || !this.config.defaultProfile) {
+      return null;
+    }
+    try {
+      const profile = loadPromptProfile(this.paseoHome, this.config.defaultProfile);
+      if (!profile) {
+        this.logger.warn(
+          { provider: PASEO_AGENT_PROVIDER, promptProfile: this.config.defaultProfile },
+          "Configured Paseo Agent prompt profile was not found",
+        );
+      }
+      return profile;
+    } catch (error) {
+      this.logger.warn(
+        {
+          provider: PASEO_AGENT_PROVIDER,
+          promptProfile: this.config.defaultProfile,
+          error: error instanceof Error ? error.message : String(error),
+        },
+        "Configured Paseo Agent prompt profile could not be loaded",
+      );
+      return null;
+    }
+  }
+
+  private verifyExpectedMcpServers(
+    expectedServers: string[],
+    configuredServers: AgentSessionConfig["mcpServers"],
+  ): void {
+    for (const serverName of new Set(expectedServers)) {
+      if (!configuredServers?.[serverName]) {
+        this.logger.warn(
+          {
+            provider: PASEO_AGENT_PROVIDER,
+            promptProfile: this.config.defaultProfile,
+            mcpServer: serverName,
+          },
+          "Paseo Agent prompt profile expects an MCP server that is not configured for this session",
+        );
+      }
+    }
   }
 }

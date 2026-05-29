@@ -12,6 +12,7 @@ import {
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { ImageContent, TextContent } from "@earendil-works/pi-ai";
 import { openaiCodexOAuthProvider } from "@earendil-works/pi-ai/oauth";
+import type { PaseoComposedPrompt } from "./prompt-profiles.js";
 
 // Re-export the Pi tool contract so the MCP bridge can build custom tools without
 // importing the Pi SDK type names itself.
@@ -86,6 +87,8 @@ export interface CreatePaseoAgentSessionOptions {
   settings?: PiSettings;
   /** Paseo-bridged tools (e.g. MCP) to register alongside built-in tools. */
   customTools?: ToolDefinition[];
+  /** Paseo-composed prompt profile/session/daemon instructions. */
+  composedPrompt?: PaseoComposedPrompt;
 }
 
 export interface PaseoAgentSessionHandle {
@@ -106,8 +109,9 @@ function createNoDiscoveryResourceLoader(options: {
   cwd: string;
   agentDir: string;
   settingsManager: SettingsManager;
+  composedPrompt?: PaseoComposedPrompt;
 }): ResourceLoader {
-  return new DefaultResourceLoader({
+  const base = new DefaultResourceLoader({
     cwd: options.cwd,
     agentDir: options.agentDir,
     settingsManager: options.settingsManager,
@@ -117,6 +121,27 @@ function createNoDiscoveryResourceLoader(options: {
     noThemes: true,
     noContextFiles: true,
   });
+  return options.composedPrompt ? wrapPromptResourceLoader(base, options.composedPrompt) : base;
+}
+
+function wrapPromptResourceLoader(
+  delegate: ResourceLoader,
+  composedPrompt: PaseoComposedPrompt,
+): ResourceLoader {
+  return {
+    getExtensions: () => delegate.getExtensions(),
+    getSkills: () => delegate.getSkills(),
+    getPrompts: () => delegate.getPrompts(),
+    getThemes: () => delegate.getThemes(),
+    getAgentsFiles: () => delegate.getAgentsFiles(),
+    getSystemPrompt: () => composedPrompt.customPrompt ?? delegate.getSystemPrompt(),
+    getAppendSystemPrompt: () => [
+      ...delegate.getAppendSystemPrompt(),
+      ...composedPrompt.appendSystemPrompt,
+    ],
+    extendResources: (paths) => delegate.extendResources(paths),
+    reload: () => delegate.reload(),
+  };
 }
 
 /**
@@ -160,6 +185,7 @@ export async function createPaseoAgentSession(
     cwd: options.cwd,
     agentDir: options.agentDir,
     settingsManager,
+    composedPrompt: options.composedPrompt,
   });
 
   const model = options.model

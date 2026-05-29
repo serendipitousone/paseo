@@ -1,4 +1,8 @@
-import { describe, expect, it } from "vitest";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import type { Logger } from "pino";
+import { afterEach, describe, expect, it } from "vitest";
 
 import { createTestLogger } from "../../../../test-utils/test-logger.js";
 import type { AgentSessionConfig } from "../../agent-sdk-types.js";
@@ -26,7 +30,30 @@ function sessionConfig(overrides?: Partial<AgentSessionConfig>): AgentSessionCon
   return { provider: "paseo", cwd: process.cwd(), ...overrides };
 }
 
+function createRecordingLogger(): Logger & { warnings: Array<{ data: unknown; message: string }> } {
+  const warnings: Array<{ data: unknown; message: string }> = [];
+  const logger = {
+    warnings,
+    child: () => logger,
+    debug: () => {},
+    warn: (data: unknown, message: string) => {
+      warnings.push({ data, message });
+    },
+    error: () => {},
+    info: () => {},
+  } as Logger & { warnings: Array<{ data: unknown; message: string }> };
+  return logger;
+}
+
 describe("PaseoAgentClient", () => {
+  const tempDirs: string[] = [];
+
+  afterEach(() => {
+    for (const dir of tempDirs.splice(0)) {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("is available only when config has a usable inference provider", async () => {
     const withConfig = new PaseoAgentClient({ logger: createTestLogger(), config: makeConfig() });
     expect(await withConfig.isAvailable()).toBe(true);
@@ -87,6 +114,110 @@ describe("PaseoAgentClient", () => {
     try {
       const info = await session.getRuntimeInfo();
       expect(info.model).toBe("openrouter-main/b");
+    } finally {
+      await session.close();
+    }
+  });
+
+  it("uses the configured default prompt profile as a lowest-precedence model default", async () => {
+    const paseoHome = mkdtempSync(join(tmpdir(), "paseo-agent-client-"));
+    tempDirs.push(paseoHome);
+    mkdirSync(join(paseoHome, "agents"), { recursive: true });
+    writeFileSync(
+      join(paseoHome, "agents", "orchestrator.md"),
+      `---
+model: openrouter-main/b
+---
+Profile prompt.
+`,
+    );
+    const config = PaseoAgentConfigSchema.parse({
+      defaultProfile: "orchestrator",
+      providers: {
+        "openrouter-main": {
+          type: "openrouter",
+          options: {
+            baseUrl: "https://openrouter.ai/api/v1",
+            apiKey: "sk-test",
+            api: "openai-completions",
+            models: [{ id: "a" }, { id: "b" }],
+          },
+        },
+      },
+    });
+    const client = new PaseoAgentClient({ logger: createTestLogger(), config, paseoHome });
+    const session = await client.createSession(sessionConfig());
+    try {
+      const info = await session.getRuntimeInfo();
+      expect(info.model).toBe("openrouter-main/b");
+    } finally {
+      await session.close();
+    }
+  });
+
+  it("prefers the configured default model over the profile default model", async () => {
+    const paseoHome = mkdtempSync(join(tmpdir(), "paseo-agent-client-"));
+    tempDirs.push(paseoHome);
+    mkdirSync(join(paseoHome, "agents"), { recursive: true });
+    writeFileSync(
+      join(paseoHome, "agents", "orchestrator.md"),
+      `---
+model: openrouter-main/b
+---
+Profile prompt.
+`,
+    );
+    const config = PaseoAgentConfigSchema.parse({
+      defaultProfile: "orchestrator",
+      defaultModel: "openrouter-main/a",
+      providers: {
+        "openrouter-main": {
+          type: "openrouter",
+          options: {
+            baseUrl: "https://openrouter.ai/api/v1",
+            apiKey: "sk-test",
+            api: "openai-completions",
+            models: [{ id: "a" }, { id: "b" }],
+          },
+        },
+      },
+    });
+    const client = new PaseoAgentClient({ logger: createTestLogger(), config, paseoHome });
+    const session = await client.createSession(sessionConfig());
+    try {
+      const info = await session.getRuntimeInfo();
+      expect(info.model).toBe("openrouter-main/a");
+    } finally {
+      await session.close();
+    }
+  });
+
+  it("warns when the configured profile expects a missing MCP server", async () => {
+    const paseoHome = mkdtempSync(join(tmpdir(), "paseo-agent-client-"));
+    tempDirs.push(paseoHome);
+    mkdirSync(join(paseoHome, "agents"), { recursive: true });
+    writeFileSync(
+      join(paseoHome, "agents", "orchestrator.md"),
+      `---
+mcp: [paseo, paseo]
+---
+Profile prompt.
+`,
+    );
+    const logger = createRecordingLogger();
+    const client = new PaseoAgentClient({
+      logger,
+      config: PaseoAgentConfigSchema.parse({ ...makeConfig(), defaultProfile: "orchestrator" }),
+      paseoHome,
+    });
+    const session = await client.createSession(sessionConfig());
+    try {
+      expect(logger.warnings).toEqual([
+        {
+          data: expect.objectContaining({ mcpServer: "paseo" }),
+          message: expect.stringMatching(/expects an MCP server/i),
+        },
+      ]);
     } finally {
       await session.close();
     }

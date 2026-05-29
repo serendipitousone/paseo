@@ -74,6 +74,7 @@ export interface BuildProviderRegistryOptions {
   providerOverrides?: Record<string, ProviderOverride>;
   workspaceGitService?: Pick<WorkspaceGitService, "resolveRepoRoot">;
   isDev?: boolean;
+  paseoHome?: string;
   /**
    * Opaque Paseo Agent config blob. The registry only forwards it to the
    * paseo-agent client factory; it never reads the nested inference providers.
@@ -83,7 +84,7 @@ export interface BuildProviderRegistryOptions {
 
 interface ProviderClientFactoryOptions extends Pick<
   BuildProviderRegistryOptions,
-  "workspaceGitService" | "paseoAgentConfig"
+  "workspaceGitService" | "paseoAgentConfig" | "paseoHome"
 > {
   providerParams?: unknown;
   customProvider?: {
@@ -160,6 +161,7 @@ const PROVIDER_CLIENT_FACTORIES: Record<string, ProviderClientFactory> = {
     new PaseoAgentClient({
       logger,
       config: options?.paseoAgentConfig ?? {},
+      paseoHome: options?.paseoHome,
     }),
   mock: (logger) => new MockLoadTestAgentClient(logger),
   "mock-slow": () => new MockSlowProviderClient(),
@@ -540,7 +542,10 @@ function createResolvedProviderClient(
 function buildResolvedBuiltinProviders(
   providerOverrides: Record<string, ProviderOverride>,
   runtimeSettings: AgentProviderRuntimeSettingsMap | undefined,
-  options: Pick<BuildProviderRegistryOptions, "workspaceGitService" | "paseoAgentConfig">,
+  options: Pick<
+    BuildProviderRegistryOptions,
+    "workspaceGitService" | "paseoAgentConfig" | "paseoHome"
+  >,
   isDev: boolean,
 ): Map<string, ResolvedProvider> {
   const resolvedProviders = new Map<string, ResolvedProvider>();
@@ -571,6 +576,7 @@ function buildResolvedBuiltinProviders(
           workspaceGitService: options.workspaceGitService,
           providerParams: override?.params,
           paseoAgentConfig: options.paseoAgentConfig,
+          paseoHome: options.paseoHome,
         }),
     });
   }
@@ -689,6 +695,7 @@ export function buildProviderRegistry(
     {
       workspaceGitService: options?.workspaceGitService,
       paseoAgentConfig: options?.paseoAgentConfig,
+      paseoHome: options?.paseoHome,
     },
     options?.isDev === true,
   );

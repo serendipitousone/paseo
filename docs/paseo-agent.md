@@ -27,6 +27,64 @@ Transports: HTTP (streamable) is the primary path (the injected `paseo` server i
 SSE and stdio transports are also wired via the MCP SDK. No extra config is needed — MCP
 servers come from Paseo's normal injection/config, not from `agents.paseo`.
 
+## Prompt profiles
+
+Paseo Agent can load a Paseo-owned prompt profile from `$PASEO_HOME/agents/*.md`.
+Configure the default profile in `agents.paseo.defaultProfile`; `orchestrator` resolves
+to `$PASEO_HOME/agents/orchestrator.md`. Only top-level markdown files are profiles.
+Reusable fragments live under `$PASEO_HOME/agents/fragments/*.md`.
+
+```jsonc
+{
+  "agents": {
+    "paseo": {
+      "defaultProfile": "orchestrator",
+      "defaultModel": "openrouter-main/anthropic/claude-3.7-sonnet",
+      "providers": {},
+    },
+  },
+}
+```
+
+Example `$PASEO_HOME/agents/orchestrator.md`:
+
+```markdown
+---
+name: Orchestrator
+description: Coordinates work through Paseo-managed agents
+mode: extend
+include:
+  - fragments/collaboration.md
+mcp: [paseo]
+model: openrouter-main/anthropic/claude-3.7-sonnet
+---
+
+Use the Paseo MCP tools to inspect active agents, create focused helper agents, and
+summarize handoffs clearly.
+
+{{include: fragments/review-rules.md}}
+```
+
+`mode: extend` keeps Pi's default base prompt and prepends the composed profile body to
+the append list. `mode: override` uses the profile body as the custom base prompt, so
+Pi's default base prompt is skipped. In both modes, per-session `systemPrompt` is appended
+after the profile, and the daemon-level append prompt is appended last.
+
+Frontmatter supports `name`, `description`, `mode`, `include`, `mcp`, `model`, and
+`projectContext`. `projectContext` is parsed for a future explicit project-context model,
+but it does not activate implicit `AGENTS.md`/`CLAUDE.md` discovery; Paseo Agent still
+keeps Pi context discovery off. `model` is only a lowest-precedence default: an explicit
+session model wins, then `agents.paseo.defaultModel`, then the profile model.
+
+Includes are deliberately confined to `$PASEO_HOME/agents`: absolute paths, `..` escapes,
+cycles, overly deep include chains, and oversized profiles are rejected. Frontmatter
+`include` entries are prepended in order; inline `{{include: fragments/foo.md}}` entries
+are expanded in place.
+
+`mcp: [paseo]` is an expectation check, not a new injection mechanism. The normal daemon
+MCP injection still supplies the actual server; if a profile declares an MCP server that
+is not present in the session's `mcpServers`, Paseo Agent logs a warning and continues.
+
 ## Config shape
 
 ```jsonc
@@ -36,6 +94,10 @@ servers come from Paseo's normal injection/config, not from `agents.paseo`.
       // Optional. "<inferenceProviderName>/<modelId>". Used when an agent is
       // started without an explicit model.
       "defaultModel": "openrouter-main/anthropic/claude-3.7-sonnet",
+
+      // Optional. Loads $PASEO_HOME/agents/orchestrator.md by default for new
+      // Paseo Agent sessions.
+      "defaultProfile": "orchestrator",
 
       // Inference providers, keyed by instance name. Names are free-form; you may
       // run several entries of the same type against different APIs/keys/models.
