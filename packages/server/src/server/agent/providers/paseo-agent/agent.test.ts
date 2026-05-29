@@ -8,6 +8,7 @@ import { createTestLogger } from "../../../../test-utils/test-logger.js";
 import type { AgentSessionConfig } from "../../agent-sdk-types.js";
 import { PaseoAgentClient } from "./agent.js";
 import { PaseoAgentConfigSchema, type PaseoAgentConfig } from "./config.js";
+import { storeCodexOAuthCredential } from "./oauth-store.js";
 
 function makeConfig(): PaseoAgentConfig {
   return PaseoAgentConfigSchema.parse({
@@ -63,6 +64,38 @@ describe("PaseoAgentClient", () => {
       config: PaseoAgentConfigSchema.parse({}),
     });
     expect(await empty.isAvailable()).toBe(false);
+  });
+
+  it("checks ChatGPT OAuth credentials in the configured Paseo home", async () => {
+    const paseoHome = mkdtempSync(join(tmpdir(), "paseo-agent-client-"));
+    const wrongHome = mkdtempSync(join(tmpdir(), "paseo-agent-wrong-home-"));
+    tempDirs.push(paseoHome, wrongHome);
+    const previousPaseoHome = process.env.PASEO_HOME;
+    process.env.PASEO_HOME = wrongHome;
+    storeCodexOAuthCredential({
+      providerInstance: "chatgpt",
+      credential: { type: "oauth", access: "access-token", refresh: "refresh-token", expires: 0 },
+      env: { PASEO_HOME: paseoHome },
+    });
+    const config = PaseoAgentConfigSchema.parse({
+      providers: {
+        chatgpt: {
+          type: "openai-codex",
+          options: { models: [{ id: "gpt-5.3-codex" }] },
+        },
+      },
+    });
+
+    try {
+      const client = new PaseoAgentClient({ logger: createTestLogger(), config, paseoHome });
+      expect(await client.isAvailable()).toBe(true);
+    } finally {
+      if (previousPaseoHome === undefined) {
+        delete process.env.PASEO_HOME;
+      } else {
+        process.env.PASEO_HOME = previousPaseoHome;
+      }
+    }
   });
 
   it("lists only configured models, never Pi disk/default models", async () => {

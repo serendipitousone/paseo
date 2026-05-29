@@ -83,6 +83,10 @@ function resolveIsolatedAgentDir(): string {
   return join(base, "pi-harness");
 }
 
+function envForPaseoHome(paseoHome: string | undefined): NodeJS.ProcessEnv {
+  return paseoHome ? { ...process.env, PASEO_HOME: paseoHome } : process.env;
+}
+
 interface PaseoAgentClientOptions {
   logger: Logger;
   config: PaseoAgentConfig;
@@ -539,7 +543,9 @@ export class PaseoAgentClient implements AgentClient {
     // OAuth providers (ChatGPT/Codex) use a Paseo-owned, file-backed AuthStorage so Pi
     // reads the stored credential and persists refreshed tokens (rotation) back to it.
     const usesOAuth = inferenceProviders.some((provider) => provider.oauth);
-    const authStorage = usesOAuth ? createPaseoAgentAuthStorage() : undefined;
+    const authStorage = usesOAuth
+      ? createPaseoAgentAuthStorage(envForPaseoHome(this.paseoHome))
+      : undefined;
 
     // Bridge Paseo-injected MCP servers (e.g. the `paseo` HTTP server) into Pi tools.
     const mcpBridge = await createMcpToolBridge({
@@ -574,8 +580,9 @@ export class PaseoAgentClient implements AgentClient {
   }
 
   async isAvailable(): Promise<boolean> {
-    return paseoAgentHasUsableModel(this.config, process.env, (providerInstance) =>
-      hasStoredOAuthCredential(providerInstance),
+    const env = envForPaseoHome(this.paseoHome);
+    return paseoAgentHasUsableModel(this.config, env, (providerInstance) =>
+      hasStoredOAuthCredential(providerInstance, env),
     );
   }
 
