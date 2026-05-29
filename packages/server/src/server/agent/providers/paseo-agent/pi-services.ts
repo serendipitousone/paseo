@@ -1,0 +1,195 @@
+import {
+  AuthStorage,
+  type AgentSession as PiAgentSession,
+  DefaultResourceLoader,
+  ModelRegistry,
+  type ResourceLoader,
+  SessionManager,
+  SettingsManager,
+  type ToolDefinition,
+  createAgentSession,
+} from "@earendil-works/pi-coding-agent";
+import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
+import type { ImageContent, TextContent } from "@earendil-works/pi-ai";
+import { openaiCodexOAuthProvider } from "@earendil-works/pi-ai/oauth";
+
+// Re-export the Pi tool contract so the MCP bridge can build custom tools without
+// importing the Pi SDK type names itself.
+export type { ToolDefinition };
+
+/** Shape a Pi custom tool's `execute` must return (subset of Pi's AgentToolResult). */
+export interface AgentToolResultLike {
+  content: (TextContent | ImageContent)[];
+  details: unknown;
+  terminate?: boolean;
+}
+
+// The single seam between Paseo and Pi's in-process harness. Every `@earendil-works/*`
+// import and all no-discovery service construction lives here so the rest of the
+// Paseo Agent provider never touches Pi's disk-backed config, auth, or sessions.
+
+// ProviderConfigInput is not re-exported from the package index, so derive it from
+// the public `registerProvider` signature.
+export type PiProviderConfig = Parameters<ModelRegistry["registerProvider"]>[1];
+type PiAuthData = Parameters<typeof AuthStorage.inMemory>[0];
+type PiSettings = Parameters<typeof SettingsManager.inMemory>[0];
+
+/** OAuth wiring for an inference provider (currently only ChatGPT/Codex). */
+export interface PaseoAgentOAuth {
+  kind: "openai-codex";
+  /**
+   * Advanced/manual override: an already-resolved refresh token to seed into the auth
+   * store. Omitted on the product path, where the credential already lives in the
+   * Paseo-owned store (populated by login).
+   */
+  refreshToken?: string;
+}
+
+export interface PaseoAgentInferenceProvider {
+  /** Instance name, e.g. "openrouter-main". Used as the Pi provider key. */
+  name: string;
+  /** Typed Pi provider config: baseUrl, apiKey, models, api, etc. */
+  config: PiProviderConfig;
+  /** When present, register an OAuth provider and seed an in-memory credential. */
+  oauth?: PaseoAgentOAuth;
+}
+
+export interface PaseoAgentModelReference {
+  provider: string;
+  id: string;
+}
+
+export interface CreatePaseoAgentSessionOptions {
+  /** Working directory for the agent. */
+  cwd: string;
+  /**
+   * Isolated, Paseo-owned global config directory. Never `~/.pi`. Used only to
+   * satisfy Pi's path math; all services below are in-memory so nothing is read
+   * from or written to it during creation.
+   */
+  agentDir: string;
+  /** Inference providers (model backends) registered entirely in memory. */
+  inferenceProviders: PaseoAgentInferenceProvider[];
+  /** Explicit model selection. When omitted, Pi falls back to its own resolution. */
+  model?: PaseoAgentModelReference;
+  thinkingLevel?: ThinkingLevel;
+  /** In-memory credential seed, if any provider auth is keyed by AuthStorage. */
+  auth?: PiAuthData;
+  /**
+   * Pi AuthStorage to use. Defaults to a fresh in-memory store. The Paseo Agent
+   * provider passes a file-backed, Paseo-owned store for OAuth providers so Pi can
+   * refresh tokens and persist rotation. Any oauth markers carrying a refresh token
+   * are still seeded into whichever store is used.
+   */
+  authStorage?: AuthStorage;
+  /** In-memory settings overrides. Empty by default. */
+  settings?: PiSettings;
+  /** Paseo-bridged tools (e.g. MCP) to register alongside built-in tools. */
+  customTools?: ToolDefinition[];
+}
+
+export interface PaseoAgentSessionHandle {
+  session: PiAgentSession;
+  modelRegistry: ModelRegistry;
+  resourceLoader: ResourceLoader;
+  sessionManager: SessionManager;
+}
+
+/**
+ * Build a fully Paseo-controlled Pi `ResourceLoader` that performs no discovery.
+ *
+ * Discovery only happens inside `reload()`; the constructor initialises valid empty
+ * state. We never call `reload()`, and the `no*` flags ensure that even an accidental
+ * reload would not scan `~/.pi`, the project, or the cwd.
+ */
+function createNoDiscoveryResourceLoader(options: {
+  cwd: string;
+  agentDir: string;
+  settingsManager: SettingsManager;
+}): ResourceLoader {
+  return new DefaultResourceLoader({
+    cwd: options.cwd,
+    agentDir: options.agentDir,
+    settingsManager: options.settingsManager,
+    noExtensions: true,
+    noSkills: true,
+    noPromptTemplates: true,
+    noThemes: true,
+    noContextFiles: true,
+  });
+}
+
+/**
+ * Create a Pi agent session through the high-level `createAgentSession` API with
+ * every service supplied in-memory and no Pi config discovery.
+ */
+export async function createPaseoAgentSession(
+  options: CreatePaseoAgentSessionOptions,
+): Promise<PaseoAgentSessionHandle> {
+  // Use the caller's Paseo-owned store when provided (so Pi refreshes + persists token
+  // rotation there), else a fresh in-memory store.
+  const authStorage = options.authStorage ?? AuthStorage.inMemory({ ...options.auth });
+
+  // Seed any oauth marker that carries a refresh token (the advanced/manual override).
+  // The product path leaves this empty — the credential is already in the Paseo store.
+  // Empty `access` + `expires: 0` forces a refresh on the first request.
+  for (const provider of options.inferenceProviders) {
+    if (provider.oauth?.kind === "openai-codex" && provider.oauth.refreshToken) {
+      authStorage.set(provider.name, {
+        type: "oauth",
+        access: "",
+        refresh: provider.oauth.refreshToken,
+        expires: 0,
+      });
+    }
+  }
+
+  const modelRegistry = ModelRegistry.inMemory(authStorage);
+
+  for (const provider of options.inferenceProviders) {
+    const config =
+      provider.oauth?.kind === "openai-codex"
+        ? { ...provider.config, oauth: openaiCodexOAuthProvider }
+        : provider.config;
+    modelRegistry.registerProvider(provider.name, config);
+  }
+
+  const settingsManager = SettingsManager.inMemory(options.settings ?? {});
+  const sessionManager = SessionManager.inMemory(options.cwd);
+  const resourceLoader = createNoDiscoveryResourceLoader({
+    cwd: options.cwd,
+    agentDir: options.agentDir,
+    settingsManager,
+  });
+
+  const model = options.model
+    ? modelRegistry.find(options.model.provider, options.model.id)
+    : undefined;
+  if (options.model && !model) {
+    throw new Error(
+      `Paseo Agent: model ${options.model.provider}/${options.model.id} is not registered by any inference provider`,
+    );
+  }
+
+  const { session } = await createAgentSession({
+    cwd: options.cwd,
+    agentDir: options.agentDir,
+    authStorage,
+    modelRegistry,
+    settingsManager,
+    sessionManager,
+    resourceLoader,
+    ...(model ? { model } : {}),
+    ...(options.thinkingLevel ? { thinkingLevel: options.thinkingLevel } : {}),
+    ...(options.customTools ? { customTools: options.customTools } : {}),
+  });
+
+  // Custom (MCP) tools are registered but not active by default — only the built-in
+  // tool set is. Activate them so the model can actually call them.
+  if (options.customTools && options.customTools.length > 0) {
+    const customToolNames = options.customTools.map((tool) => tool.name);
+    session.setActiveToolsByName([...session.getActiveToolNames(), ...customToolNames]);
+  }
+
+  return { session, modelRegistry, resourceLoader, sessionManager };
+}

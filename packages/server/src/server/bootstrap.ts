@@ -133,6 +133,7 @@ import type {
   AgentProviderRuntimeSettingsMap,
   ProviderOverride,
 } from "./agent/provider-launch-config.js";
+import type { PaseoAgentConfig } from "./agent/providers/paseo-agent/config.js";
 import type { PersistedConfig } from "./persisted-config.js";
 import { createServiceProxySubsystem, type ServiceProxySubsystem } from "./service-proxy.js";
 import { ScriptHealthMonitor } from "./script-health-monitor.js";
@@ -350,6 +351,7 @@ export interface PaseoDaemonConfig {
     }>;
   };
   providerOverrides?: Record<string, ProviderOverride>;
+  paseoAgentConfig?: PaseoAgentConfig;
   log?: PersistedConfig["log"];
   onLifecycleIntent?: (intent: DaemonLifecycleIntent) => void;
   pushNotificationSender?: PushNotificationSender;
@@ -642,6 +644,7 @@ export async function createPaseoDaemon(
     logger: providerSnapshotLogger,
     runtimeSettings: config.agentProviderSettings,
     providerOverrides: config.providerOverrides,
+    paseoAgentConfig: config.paseoAgentConfig,
     workspaceGitService,
     isDev: config.isDev === true,
     extraClients: config.agentClients,

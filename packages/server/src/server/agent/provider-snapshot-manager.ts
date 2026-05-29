@@ -25,6 +25,7 @@ import {
   shutdownAgentClients,
   type ProviderDefinition,
 } from "./provider-registry.js";
+import type { PaseoAgentConfig } from "./providers/paseo-agent/config.js";
 import { applyMutableProviderConfigToOverrides } from "../daemon-config-store.js";
 import type { MutableDaemonConfig } from "../daemon-config-store.js";
 
@@ -59,6 +60,7 @@ export interface ProviderSnapshotManagerOptions {
   isDev?: boolean;
   extraClients?: Partial<Record<AgentProvider, AgentClient>>;
   refreshTimeoutMs?: number;
+  paseoAgentConfig?: PaseoAgentConfig;
 }
 
 interface ProviderSnapshotRefreshOptions {
@@ -132,6 +134,7 @@ export class ProviderSnapshotManager {
   private runtimeSettings: AgentProviderRuntimeSettingsMap | undefined;
   private providerOverrides: Record<string, ProviderOverride> | undefined;
   private readonly baseProviderOverrides: Record<string, ProviderOverride> | undefined;
+  private readonly paseoAgentConfig: PaseoAgentConfig | undefined;
   private providerRegistry: Record<AgentProvider, ProviderDefinition>;
   private providerClients: Record<AgentProvider, AgentClient>;
 
@@ -143,6 +146,7 @@ export class ProviderSnapshotManager {
     this.runtimeSettings = options.runtimeSettings;
     this.providerOverrides = options.providerOverrides;
     this.baseProviderOverrides = options.providerOverrides;
+    this.paseoAgentConfig = options.paseoAgentConfig;
     this.refreshTimeoutMs = resolveRefreshTimeoutMs(options.refreshTimeoutMs);
     this.providerRegistry = this.buildRegistry();
     this.providerClients = { ...this.extraClients } as Record<AgentProvider, AgentClient>;
@@ -397,6 +401,7 @@ export class ProviderSnapshotManager {
       providerOverrides: this.providerOverrides,
       workspaceGitService: this.workspaceGitService,
       isDev: this.isDev,
+      paseoAgentConfig: this.paseoAgentConfig,
     });
 
     for (const [provider, client] of Object.entries(this.extraClients) as Array<

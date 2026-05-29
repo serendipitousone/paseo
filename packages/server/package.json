@@ -64,6 +64,9 @@
   "dependencies": {
     "@agentclientprotocol/sdk": "^0.17.1",
     "@anthropic-ai/claude-agent-sdk": "^0.2.133",
+    "@earendil-works/pi-agent-core": "0.77.0",
+    "@earendil-works/pi-ai": "0.77.0",
+    "@earendil-works/pi-coding-agent": "0.77.0",
     "@getpaseo/client": "0.1.96",
     "@getpaseo/highlight": "0.1.96",
     "@getpaseo/protocol": "0.1.96",
