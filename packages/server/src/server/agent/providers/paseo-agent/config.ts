@@ -163,7 +163,9 @@ export const PaseoAgentConfigSchema = z
   .object({
     // Optional default model as "<inferenceProviderName>/<modelId>".
     defaultModel: z.string().min(1).optional(),
-    // Optional default prompt profile from $PASEO_HOME/agents/<name>.md.
+    // Optional default agent definition from $PASEO_HOME/agents/<name>.md.
+    defaultAgent: z.string().min(1).optional(),
+    // Legacy alias for defaultAgent.
     defaultProfile: z.string().min(1).optional(),
     // Inference providers keyed by instance name. Multiple entries may share a
     // type while pointing at different APIs/base URLs/models.
@@ -357,13 +359,13 @@ export function resolvePaseoAgentModel(
   config: PaseoAgentConfig,
   requestedModelId: string | null | undefined,
   registeredProviders: PaseoAgentInferenceProvider[] = paseoAgentInferenceProviders(config),
-  profileDefaultModelId?: string | null,
+  agentDefaultModelId?: string | null,
 ): PaseoAgentModelReference | undefined {
   if (requestedModelId) {
     return parsePaseoAgentModelId(requestedModelId) ?? undefined;
   }
 
-  for (const candidate of [config.defaultModel, profileDefaultModelId, firstModelId(config)]) {
+  for (const candidate of [agentDefaultModelId, config.defaultModel, firstModelId(config)]) {
     if (!candidate) {
       continue;
     }

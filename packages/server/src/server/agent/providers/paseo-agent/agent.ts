@@ -6,7 +6,6 @@ import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { AgentSessionEvent } from "@earendil-works/pi-coding-agent";
 
 import {
-  getAgentStreamEventTurnId,
   type AgentCapabilityFlags,
   type AgentClient,
   type AgentLaunchContext,
@@ -23,10 +22,10 @@ import {
   type AgentSessionConfig,
   type AgentSlashCommand,
   type AgentStreamEvent,
-  type AgentTimelineItem,
-  type AgentUsage,
+  type ListModesOptions,
   type ListModelsOptions,
 } from "../../agent-sdk-types.js";
+import { appendOrReplaceGrowingAssistantMessage, runProviderTurn } from "../provider-runner.js";
 import {
   PASEO_AGENT_PROVIDER,
   type PaseoAgentConfig,
@@ -48,7 +47,13 @@ import {
 import { createMcpToolBridge, type McpToolBridge } from "./mcp-bridge.js";
 import { createPaseoAgentAuthStorage, hasStoredOAuthCredential } from "./oauth-store.js";
 import { createPaseoAgentSession, type PaseoAgentSessionHandle } from "./pi-services.js";
-import { composePromptParts, loadPromptProfile } from "./prompt-profiles.js";
+import { createToolPermissionPolicy } from "./agent-permissions.js";
+import {
+  composePromptParts,
+  listAgentDefinitionIds,
+  loadAgentDefinition,
+  type ResolvedAgentDefinition,
+} from "./prompt-profiles.js";
 
 const DEFAULT_THINKING_LEVEL: ThinkingLevel = "medium";
 
@@ -87,6 +92,17 @@ function envForPaseoHome(paseoHome: string | undefined): NodeJS.ProcessEnv {
   return paseoHome ? { ...process.env, PASEO_HOME: paseoHome } : process.env;
 }
 
+function errorToMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function isAbortError(error: unknown): boolean {
+  if (error instanceof Error && error.name === "AbortError") {
+    return true;
+  }
+  return /\brequest was aborted\b|\babort(ed)?\b/i.test(errorToMessage(error));
+}
+
 interface PaseoAgentClientOptions {
   logger: Logger;
   config: PaseoAgentConfig;
@@ -101,11 +117,14 @@ export class PaseoAgentSession implements AgentSession {
   private readonly activeToolCalls = new Map<string, PiTrackedToolCall>();
   private activeTurnId: string | null = null;
   private lastThinkingOptionId: string | null;
+  private closePromise: Promise<void> | null = null;
 
   constructor(
     private readonly handle: PaseoAgentSessionHandle,
     private readonly config: AgentSessionConfig,
     private readonly mcpBridge: McpToolBridge,
+    private readonly agentId: string | null,
+    private readonly availableAgents: AgentMode[],
   ) {
     this.lastThinkingOptionId =
       normalizeThinkingLevel(config.thinkingOptionId) ?? this.piSession.thinkingLevel ?? null;
@@ -124,6 +143,27 @@ export class PaseoAgentSession implements AgentSession {
     for (const subscriber of this.subscribers) {
       subscriber(event);
     }
+  }
+
+  private clearActiveTurn(): string | null {
+    const turnId = this.activeTurnId;
+    this.activeTurnId = null;
+    this.activeToolCalls.clear();
+    return turnId;
+  }
+
+  private emitActiveTurnCanceled(reason: string): boolean {
+    const turnId = this.clearActiveTurn();
+    if (!turnId) {
+      return false;
+    }
+    this.emit({
+      type: "turn_canceled",
+      provider: PASEO_AGENT_PROVIDER,
+      turnId,
+      reason,
+    });
+    return true;
   }
 
   private emitToolCall(
@@ -158,29 +198,9 @@ export class PaseoAgentSession implements AgentSession {
       case "turn_start":
         this.emit({ type: "turn_started", provider: PASEO_AGENT_PROVIDER, turnId });
         return;
-      case "message_update": {
-        if (event.message.role !== "assistant") {
-          return;
-        }
-        if (event.assistantMessageEvent.type === "text_delta") {
-          this.emit({
-            type: "timeline",
-            provider: PASEO_AGENT_PROVIDER,
-            turnId,
-            item: { type: "assistant_message", text: event.assistantMessageEvent.delta ?? "" },
-          });
-          return;
-        }
-        if (event.assistantMessageEvent.type === "thinking_delta") {
-          this.emit({
-            type: "timeline",
-            provider: PASEO_AGENT_PROVIDER,
-            turnId,
-            item: { type: "reasoning", text: event.assistantMessageEvent.delta ?? "" },
-          });
-        }
+      case "message_update":
+        this.handleMessageUpdate(event, turnId);
         return;
-      }
       case "tool_execution_start": {
         const toolCall = parseToolArgs(event.toolName, event.args);
         this.activeToolCalls.set(event.toolCallId, toolCall);
@@ -216,96 +236,76 @@ export class PaseoAgentSession implements AgentSession {
         );
         return;
       }
-      case "agent_end": {
-        const usage = toAgentUsage(this.piSession.getSessionStats());
-        const currentTurnId = turnId;
-        this.activeTurnId = null;
-        const errorMessage = this.piSession.agent.state.errorMessage;
-        if (errorMessage) {
-          this.emit({
-            type: "turn_failed",
-            provider: PASEO_AGENT_PROVIDER,
-            turnId: currentTurnId,
-            error: errorMessage,
-          });
-          return;
-        }
-        this.emit({
-          type: "turn_completed",
-          provider: PASEO_AGENT_PROVIDER,
-          turnId: currentTurnId,
-          usage,
-        });
+      case "agent_end":
+        this.handleAgentEnd(event);
         return;
-      }
       default:
         return;
     }
   }
 
+  private handleMessageUpdate(
+    event: Extract<AgentSessionEvent, { type: "message_update" }>,
+    turnId: string | undefined,
+  ): void {
+    if (event.message.role !== "assistant") {
+      return;
+    }
+    if (event.assistantMessageEvent.type === "text_delta") {
+      this.emit({
+        type: "timeline",
+        provider: PASEO_AGENT_PROVIDER,
+        turnId,
+        item: { type: "assistant_message", text: event.assistantMessageEvent.delta ?? "" },
+      });
+      return;
+    }
+    if (event.assistantMessageEvent.type === "thinking_delta") {
+      this.emit({
+        type: "timeline",
+        provider: PASEO_AGENT_PROVIDER,
+        turnId,
+        item: { type: "reasoning", text: event.assistantMessageEvent.delta ?? "" },
+      });
+    }
+  }
+
+  private handleAgentEnd(event: Extract<AgentSessionEvent, { type: "agent_end" }>): void {
+    if (event.willRetry) {
+      return;
+    }
+    const usage = toAgentUsage(this.piSession.getSessionStats());
+    const currentTurnId = this.clearActiveTurn() ?? undefined;
+    if (!currentTurnId) {
+      return;
+    }
+    const errorMessage = this.piSession.agent.state.errorMessage;
+    if (errorMessage) {
+      this.emit({
+        type: "turn_failed",
+        provider: PASEO_AGENT_PROVIDER,
+        turnId: currentTurnId,
+        error: errorMessage,
+      });
+      return;
+    }
+    this.emit({
+      type: "turn_completed",
+      provider: PASEO_AGENT_PROVIDER,
+      turnId: currentTurnId,
+      usage,
+    });
+  }
+
   async run(prompt: AgentPromptInput, options?: AgentRunOptions): Promise<AgentRunResult> {
-    const timeline: AgentTimelineItem[] = [];
-    let finalText = "";
-    let usage: AgentUsage | undefined;
-    let turnId: string | null = null;
-    const bufferedEvents: AgentStreamEvent[] = [];
-    let settled = false;
-    let resolveCompletion!: () => void;
-    let rejectCompletion!: (error: Error) => void;
-
-    function processEvent(event: AgentStreamEvent): void {
-      if (settled) {
-        return;
-      }
-      const eventTurnId = getAgentStreamEventTurnId(event);
-      if (turnId && eventTurnId && eventTurnId !== turnId) {
-        return;
-      }
-      if (event.type === "timeline") {
-        timeline.push(event.item);
-        if (event.item.type === "assistant_message") {
-          finalText += event.item.text;
-        }
-        return;
-      }
-      if (event.type === "turn_completed") {
-        usage = event.usage;
-        settled = true;
-        resolveCompletion();
-        return;
-      }
-      if (event.type === "turn_failed") {
-        settled = true;
-        rejectCompletion(new Error(event.error));
-      }
-    }
-
-    const completion = new Promise<void>((resolve, reject) => {
-      resolveCompletion = resolve;
-      rejectCompletion = reject;
+    return runProviderTurn({
+      prompt,
+      runOptions: options,
+      startTurn: (p, o) => this.startTurn(p, o),
+      subscribe: (callback) => this.subscribe(callback),
+      getSessionId: () => this.piSession.sessionId,
+      reduceFinalText: appendOrReplaceGrowingAssistantMessage,
     });
-    const unsubscribe = this.subscribe((event) => {
-      if (!turnId) {
-        bufferedEvents.push(event);
-        return;
-      }
-      processEvent(event);
-    });
-
-    try {
-      const result = await this.startTurn(prompt, options);
-      turnId = result.turnId;
-      for (const event of bufferedEvents) {
-        processEvent(event);
-      }
-      if (!settled) {
-        await completion;
-      }
-    } finally {
-      unsubscribe();
-    }
-
-    return { sessionId: this.piSession.sessionId, finalText, usage, timeline };
   }
 
   async startTurn(
@@ -322,13 +322,19 @@ export class PaseoAgentSession implements AgentSession {
     void this.piSession
       .prompt(payload.text, payload.images ? { images: payload.images } : undefined)
       .catch((error: unknown) => {
-        const failedTurnId = this.activeTurnId ?? turnId;
-        this.activeTurnId = null;
+        if (this.activeTurnId !== turnId) {
+          return;
+        }
+        if (isAbortError(error)) {
+          this.emitActiveTurnCanceled(errorToMessage(error));
+          return;
+        }
+        const failedTurnId = this.clearActiveTurn() ?? turnId;
         this.emit({
           type: "turn_failed",
           provider: PASEO_AGENT_PROVIDER,
           turnId: failedTurnId,
-          error: error instanceof Error ? error.message : String(error),
+          error: errorToMessage(error),
         });
       });
 
@@ -426,20 +432,23 @@ export class PaseoAgentSession implements AgentSession {
       model: model ? `${model.provider}/${model.id}` : null,
       thinkingOptionId:
         normalizeThinkingLevel(this.lastThinkingOptionId) ?? this.piSession.thinkingLevel ?? null,
-      modeId: null,
+      modeId: this.agentId,
     };
   }
 
   async getAvailableModes(): Promise<AgentMode[]> {
-    return [];
+    return this.availableAgents;
   }
 
   async getCurrentMode(): Promise<string | null> {
-    return null;
+    return this.agentId;
   }
 
-  async setMode(_modeId: string): Promise<void> {
-    throw new Error("Paseo Agent does not expose selectable modes");
+  async setMode(modeId: string): Promise<void> {
+    if (modeId === this.agentId) {
+      return;
+    }
+    throw new Error("Paseo Agent selection is fixed when the session starts");
   }
 
   getPendingPermissions(): AgentPermissionRequest[] {
@@ -456,12 +465,28 @@ export class PaseoAgentSession implements AgentSession {
   }
 
   async interrupt(): Promise<void> {
-    await this.piSession.abort();
+    const canceled = this.emitActiveTurnCanceled("interrupted");
+    try {
+      await this.piSession.abort();
+    } catch (error) {
+      if (!canceled || !isAbortError(error)) {
+        throw error;
+      }
+    }
   }
 
   async close(): Promise<void> {
-    this.piSession.dispose();
-    await this.mcpBridge.close();
+    this.closePromise ??= (async () => {
+      try {
+        if (this.activeTurnId) {
+          await this.interrupt();
+        }
+      } finally {
+        this.piSession.dispose();
+        await this.mcpBridge.close();
+      }
+    })();
+    await this.closePromise;
   }
 
   async listCommands(): Promise<AgentSlashCommand[]> {
@@ -517,17 +542,18 @@ export class PaseoAgentClient implements AgentClient {
       );
     }
 
-    const profile = this.loadDefaultProfile();
-    this.verifyExpectedMcpServers(profile?.expectedMcpServers ?? [], config.mcpServers);
+    const availableAgents = this.loadAvailableAgentModes();
+    const agent = this.loadSelectedAgent(config.modeId);
+    this.verifyExpectedMcpServers(agent, config.mcpServers);
     const model = resolvePaseoAgentModel(
       this.config,
       config.model,
       inferenceProviders,
-      profile?.model,
+      agent?.model,
     );
     const thinkingLevel = normalizeThinkingLevel(config.thinkingOptionId) ?? undefined;
     const composedPrompt = composePromptParts({
-      profile,
+      agent,
       systemPrompt: config.systemPrompt,
       daemonAppendSystemPrompt: config.daemonAppendSystemPrompt,
     });
@@ -535,7 +561,7 @@ export class PaseoAgentClient implements AgentClient {
       {
         provider: PASEO_AGENT_PROVIDER,
         model: model ? `${model.provider}/${model.id}` : null,
-        promptProfile: profile?.id ?? null,
+        agent: agent?.id ?? null,
       },
       "Creating Paseo Agent session",
     );
@@ -548,6 +574,7 @@ export class PaseoAgentClient implements AgentClient {
       : undefined;
 
     // Bridge Paseo-injected MCP servers (e.g. the `paseo` HTTP server) into Pi tools.
+    const permissionPolicy = createToolPermissionPolicy(agent?.permissions);
     const mcpBridge = await createMcpToolBridge({
       mcpServers: config.mcpServers,
       logger: this.logger,
@@ -562,9 +589,11 @@ export class PaseoAgentClient implements AgentClient {
         ...(thinkingLevel ? { thinkingLevel } : {}),
         ...(authStorage ? { authStorage } : {}),
         ...(mcpBridge.tools.length > 0 ? { customTools: mcpBridge.tools } : {}),
+        ...(agent?.tools ? { tools: agent.tools } : {}),
+        permissionPolicy,
         ...(composedPrompt ? { composedPrompt } : {}),
       });
-      return new PaseoAgentSession(handle, config, mcpBridge);
+      return new PaseoAgentSession(handle, config, mcpBridge, agent?.id ?? null, availableAgents);
     } catch (error) {
       await mcpBridge.close();
       throw error;
@@ -579,6 +608,10 @@ export class PaseoAgentClient implements AgentClient {
     return listPaseoAgentModels(this.config);
   }
 
+  async listModes(_options: ListModesOptions): Promise<AgentMode[]> {
+    return this.loadAvailableAgentModes();
+  }
+
   async isAvailable(): Promise<boolean> {
     const env = envForPaseoHome(this.paseoHome);
     return paseoAgentHasUsableModel(this.config, env, (providerInstance) =>
@@ -586,45 +619,81 @@ export class PaseoAgentClient implements AgentClient {
     );
   }
 
-  private loadDefaultProfile() {
-    if (!this.paseoHome || !this.config.defaultProfile) {
+  private loadSelectedAgent(requestedAgentId: string | undefined): ResolvedAgentDefinition | null {
+    const selectedAgentId =
+      requestedAgentId ?? this.config.defaultAgent ?? this.config.defaultProfile;
+    if (!this.paseoHome || !selectedAgentId) {
       return null;
     }
     try {
-      const profile = loadPromptProfile(this.paseoHome, this.config.defaultProfile);
-      if (!profile) {
+      const agent = loadAgentDefinition(this.paseoHome, selectedAgentId);
+      if (!agent) {
         this.logger.warn(
-          { provider: PASEO_AGENT_PROVIDER, promptProfile: this.config.defaultProfile },
-          "Configured Paseo Agent prompt profile was not found",
+          { provider: PASEO_AGENT_PROVIDER, agent: selectedAgentId },
+          "Configured Paseo Agent definition was not found",
         );
       }
-      return profile;
+      return agent;
     } catch (error) {
       this.logger.warn(
         {
           provider: PASEO_AGENT_PROVIDER,
-          promptProfile: this.config.defaultProfile,
+          agent: selectedAgentId,
           error: error instanceof Error ? error.message : String(error),
         },
-        "Configured Paseo Agent prompt profile could not be loaded",
+        "Configured Paseo Agent definition could not be loaded",
       );
       return null;
     }
   }
 
+  private loadAvailableAgentModes(): AgentMode[] {
+    const paseoHome = this.paseoHome;
+    if (!paseoHome) {
+      return [];
+    }
+    return listAgentDefinitionIds(paseoHome).flatMap((agentId): AgentMode[] => {
+      try {
+        const agent = loadAgentDefinition(paseoHome, agentId);
+        if (!agent) {
+          return [];
+        }
+        return [
+          {
+            id: agent.id,
+            label: agent.frontmatter.name ?? agent.id,
+            ...(agent.frontmatter.description
+              ? { description: agent.frontmatter.description }
+              : {}),
+          },
+        ];
+      } catch (error) {
+        this.logger.warn(
+          {
+            provider: PASEO_AGENT_PROVIDER,
+            agent: agentId,
+            error: error instanceof Error ? error.message : String(error),
+          },
+          "Paseo Agent definition could not be listed",
+        );
+        return [];
+      }
+    });
+  }
+
   private verifyExpectedMcpServers(
-    expectedServers: string[],
+    agent: ResolvedAgentDefinition | null,
     configuredServers: AgentSessionConfig["mcpServers"],
   ): void {
-    for (const serverName of new Set(expectedServers)) {
+    for (const serverName of new Set(agent?.expectedMcpServers ?? [])) {
       if (!configuredServers?.[serverName]) {
         this.logger.warn(
           {
             provider: PASEO_AGENT_PROVIDER,
-            promptProfile: this.config.defaultProfile,
+            agent: agent?.id ?? null,
             mcpServer: serverName,
           },
-          "Paseo Agent prompt profile expects an MCP server that is not configured for this session",
+          "Paseo Agent definition expects an MCP server that is not configured for this session",
         );
       }
     }

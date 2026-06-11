@@ -216,9 +216,15 @@ describe("paseoAgentHasUsableModel (env-aware auth)", () => {
 });
 
 describe("resolvePaseoAgentModel", () => {
-  it("prefers the explicit request, then default, then first configured", () => {
+  it("prefers the explicit request, then agent model, then default, then first configured", () => {
     const config = configWith({ defaultModel: "openrouter-main/openai/gpt" });
     expect(resolvePaseoAgentModel(config, "openrouter-main/anthropic/claude")).toEqual({
+      provider: "openrouter-main",
+      id: "anthropic/claude",
+    });
+    expect(
+      resolvePaseoAgentModel(config, null, undefined, "openrouter-main/anthropic/claude"),
+    ).toEqual({
       provider: "openrouter-main",
       id: "anthropic/claude",
     });

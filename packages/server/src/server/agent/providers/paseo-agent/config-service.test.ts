@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
@@ -171,7 +171,25 @@ describe("PaseoAgentConfigService", () => {
         models: [{ id: "anthropic/claude-3.7-sonnet" }],
       },
     });
-    service.setDefaultModel("openrouter-main/anthropic/claude-3.7-sonnet");
+    writeFileSync(
+      join(home, "config.json"),
+      JSON.stringify({
+        agents: {
+          paseo: {
+            defaultModel: "openrouter-main/anthropic/claude-3.7-sonnet",
+            providers: {
+              "openrouter-main": {
+                type: "openrouter",
+                options: {
+                  apiKey: "sk-secret-openrouter",
+                  models: [{ id: "anthropic/claude-3.7-sonnet" }],
+                },
+              },
+            },
+          },
+        },
+      }),
+    );
 
     expect(service.removeProvider("openrouter-main")).toBe(true);
     expect(service.getProviders()).toEqual({ defaultModel: null, providers: [] });

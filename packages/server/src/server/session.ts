@@ -2212,8 +2212,6 @@ export class Session {
         return this.handlePaseoAgentSetProviderRequest(msg);
       case "config.paseo_agent.remove_provider.request":
         return this.handlePaseoAgentRemoveProviderRequest(msg);
-      case "config.paseo_agent.set_default_model.request":
-        return this.handlePaseoAgentSetDefaultModelRequest(msg);
       case "config.paseo_agent.store_chatgpt_credential.request":
         return this.handlePaseoAgentStoreChatGptCredentialRequest(msg);
       case "list_available_providers_request":
@@ -4122,35 +4120,6 @@ export class Session {
           requestId: msg.requestId,
           success: false,
           removed: false,
-          error: getErrorMessage(error),
-        },
-      });
-    }
-  }
-
-  private async handlePaseoAgentSetDefaultModelRequest(
-    msg: Extract<SessionInboundMessage, { type: "config.paseo_agent.set_default_model.request" }>,
-  ): Promise<void> {
-    try {
-      const defaultModel = this.createPaseoAgentConfigService().setDefaultModel(msg.model);
-      await this.refreshPaseoAgentRuntimeSnapshot();
-      this.emit({
-        type: "config.paseo_agent.set_default_model.response",
-        payload: {
-          requestId: msg.requestId,
-          success: true,
-          defaultModel,
-          error: null,
-        },
-      });
-    } catch (error) {
-      this.sessionLogger.error({ err: error }, "Failed to set Paseo Agent default model");
-      this.emit({
-        type: "config.paseo_agent.set_default_model.response",
-        payload: {
-          requestId: msg.requestId,
-          success: false,
-          defaultModel: null,
           error: getErrorMessage(error),
         },
       });

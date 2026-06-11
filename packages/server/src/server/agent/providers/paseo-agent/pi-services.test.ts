@@ -2,7 +2,9 @@ import { existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AuthStorage } from "@earendil-works/pi-coding-agent";
+import type { BeforeToolCallContext } from "@earendil-works/pi-agent-core";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { createToolPermissionPolicy } from "./agent-permissions.js";
 
 import {
   type CreatePaseoAgentSessionOptions,
@@ -34,6 +36,15 @@ function codexInferenceProvider(): PaseoAgentInferenceProvider {
 
 const FAKE_PROVIDER = "paseo-test-openrouter";
 const FAKE_MODEL_ID = "test-model";
+
+function toolCallContext(toolName: string): BeforeToolCallContext {
+  return {
+    assistantMessage: { role: "assistant", content: [] },
+    toolCall: { type: "toolCall", id: "call-1", name: toolName, arguments: {} },
+    args: {},
+    context: {},
+  } as BeforeToolCallContext;
+}
 
 function fakeInferenceProvider(): PaseoAgentInferenceProvider {
   return {
@@ -178,6 +189,75 @@ describe("createPaseoAgentSession (no-discovery spike)", () => {
     expect(active).toContain("paseo__demo");
     // Built-in tools remain active too.
     expect(active).toContain("bash");
+  });
+
+  it("honors an explicit agent tool allowlist", async () => {
+    const { session } = await createPaseoAgentSession({
+      ...baseOptions(),
+      tools: ["read", "paseo__demo"],
+      customTools: [
+        {
+          name: "paseo__demo",
+          label: "demo",
+          description: "demo tool",
+          parameters: { type: "object" } as never,
+          async execute() {
+            return { content: [{ type: "text", text: "ok" }], details: null };
+          },
+        },
+      ],
+    });
+
+    expect(session.getActiveToolNames().sort()).toEqual(["paseo__demo", "read"]);
+  });
+
+  it("blocks a denied built-in tool through Pi's preflight hook", async () => {
+    const { session } = await createPaseoAgentSession({
+      ...baseOptions(),
+      tools: ["bash"],
+      permissionPolicy: createToolPermissionPolicy([{ tool: "bash", action: "deny" }]),
+    });
+
+    expect(session.getActiveToolNames()).toEqual(["bash"]);
+    await expect(session.agent.beforeToolCall?.(toolCallContext("bash"))).resolves.toEqual({
+      block: true,
+      reason: 'Paseo Agent denied tool "bash" by agent permissions.',
+    });
+  });
+
+  it("allows unmatched built-in tools to fall through the existing Pi hook", async () => {
+    const { session } = await createPaseoAgentSession({
+      ...baseOptions(),
+      tools: ["bash"],
+      permissionPolicy: createToolPermissionPolicy([{ tool: "read", action: "deny" }]),
+    });
+
+    await expect(session.agent.beforeToolCall?.(toolCallContext("bash"))).resolves.toBeUndefined();
+  });
+
+  it("blocks a denied custom tool through the same Pi preflight hook", async () => {
+    const { session } = await createPaseoAgentSession({
+      ...baseOptions(),
+      tools: ["paseo__demo"],
+      customTools: [
+        {
+          name: "paseo__demo",
+          label: "demo",
+          description: "demo tool",
+          parameters: { type: "object" } as never,
+          async execute() {
+            return { content: [{ type: "text", text: "ok" }], details: null };
+          },
+        },
+      ],
+      permissionPolicy: createToolPermissionPolicy([{ tool: "paseo__*", action: "deny" }]),
+    });
+
+    expect(session.getActiveToolNames()).toEqual(["paseo__demo"]);
+    await expect(session.agent.beforeToolCall?.(toolCallContext("paseo__demo"))).resolves.toEqual({
+      block: true,
+      reason: 'Paseo Agent denied tool "paseo__demo" by agent permissions.',
+    });
   });
 
   it("registers a codex provider and seeds the advanced refresh-token override", async () => {

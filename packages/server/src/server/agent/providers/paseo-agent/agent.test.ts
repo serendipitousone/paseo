@@ -1,14 +1,16 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { AgentSessionEvent } from "@earendil-works/pi-coding-agent";
 import type { Logger } from "pino";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { createTestLogger } from "../../../../test-utils/test-logger.js";
-import type { AgentSessionConfig } from "../../agent-sdk-types.js";
-import { PaseoAgentClient } from "./agent.js";
+import type { AgentSessionConfig, AgentStreamEvent } from "../../agent-sdk-types.js";
+import { PaseoAgentClient, PaseoAgentSession } from "./agent.js";
 import { PaseoAgentConfigSchema, type PaseoAgentConfig } from "./config.js";
 import { storeCodexOAuthCredential } from "./oauth-store.js";
+import type { PaseoAgentSessionHandle } from "./pi-services.js";
 
 function makeConfig(): PaseoAgentConfig {
   return PaseoAgentConfigSchema.parse({
@@ -44,6 +46,112 @@ function createRecordingLogger(): Logger & { warnings: Array<{ data: unknown; me
     info: () => {},
   } as Logger & { warnings: Array<{ data: unknown; message: string }> };
   return logger;
+}
+
+function deferred<T = void>(): {
+  promise: Promise<T>;
+  resolve: (value: T | PromiseLike<T>) => void;
+  reject: (error: unknown) => void;
+} {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((innerResolve, innerReject) => {
+    resolve = innerResolve;
+    reject = innerReject;
+  });
+  return { promise, resolve, reject };
+}
+
+class FakeInProcessPiSession {
+  readonly sessionId = "pi-session-1";
+  readonly thinkingLevel = "medium";
+  readonly model = { provider: "openrouter-main", id: "test-model" };
+  readonly messages: Array<{ role: string; content: unknown }> = [];
+  readonly agent = { state: { errorMessage: "" } };
+  abortCalls = 0;
+  disposeCalls = 0;
+  promptCalls: Array<{ text: string; options: unknown }> = [];
+  promptDeferred = deferred();
+  private readonly subscribers = new Set<(event: AgentSessionEvent) => void>();
+
+  subscribe(callback: (event: AgentSessionEvent) => void): () => void {
+    this.subscribers.add(callback);
+    return () => {
+      this.subscribers.delete(callback);
+    };
+  }
+
+  async prompt(text: string, options?: unknown): Promise<void> {
+    this.promptCalls.push({ text, options });
+    await this.promptDeferred.promise;
+  }
+
+  async abort(): Promise<void> {
+    this.abortCalls += 1;
+    const error = new Error("Request was aborted");
+    error.name = "AbortError";
+    this.promptDeferred.reject(error);
+  }
+
+  dispose(): void {
+    this.disposeCalls += 1;
+  }
+
+  getSessionStats() {
+    return {
+      sessionFile: undefined,
+      sessionId: this.sessionId,
+      userMessages: 1,
+      assistantMessages: 1,
+      toolCalls: 0,
+      toolResults: 0,
+      totalMessages: 2,
+      tokens: { input: 3, output: 5, cacheRead: 2, cacheWrite: 0, total: 10 },
+      cost: 0.01,
+    };
+  }
+
+  setThinkingLevel(): void {}
+
+  async setModel(): Promise<void> {}
+
+  emit(event: AgentSessionEvent): void {
+    for (const subscriber of this.subscribers) {
+      subscriber(event);
+    }
+  }
+}
+
+function createPaseoProviderSession(): {
+  fakePi: FakeInProcessPiSession;
+  session: PaseoAgentSession;
+  events: AgentStreamEvent[];
+  mcpBridge: { closeCalls: number };
+} {
+  const fakePi = new FakeInProcessPiSession();
+  const handle = {
+    session: fakePi,
+    modelRegistry: { find: () => fakePi.model },
+    resourceLoader: {},
+    sessionManager: {},
+  } as unknown as PaseoAgentSessionHandle;
+  const mcpBridge = {
+    tools: [],
+    closeCalls: 0,
+    async close() {
+      this.closeCalls += 1;
+    },
+  };
+  const session = new PaseoAgentSession(
+    handle,
+    sessionConfig(),
+    mcpBridge as unknown as ConstructorParameters<typeof PaseoAgentSession>[2],
+    null,
+    [],
+  );
+  const events: AgentStreamEvent[] = [];
+  session.subscribe((event) => events.push(event));
+  return { fakePi, session, events, mcpBridge };
 }
 
 describe("PaseoAgentClient", () => {
@@ -152,7 +260,7 @@ describe("PaseoAgentClient", () => {
     }
   });
 
-  it("uses the configured default prompt profile as a lowest-precedence model default", async () => {
+  it("uses the selected agent as a model default", async () => {
     const paseoHome = mkdtempSync(join(tmpdir(), "paseo-agent-client-"));
     tempDirs.push(paseoHome);
     mkdirSync(join(paseoHome, "agents"), { recursive: true });
@@ -165,7 +273,7 @@ Profile prompt.
 `,
     );
     const config = PaseoAgentConfigSchema.parse({
-      defaultProfile: "orchestrator",
+      defaultAgent: "orchestrator",
       providers: {
         "openrouter-main": {
           type: "openrouter",
@@ -188,7 +296,7 @@ Profile prompt.
     }
   });
 
-  it("prefers the configured default model over the profile default model", async () => {
+  it("prefers the selected agent model over the configured default model", async () => {
     const paseoHome = mkdtempSync(join(tmpdir(), "paseo-agent-client-"));
     tempDirs.push(paseoHome);
     mkdirSync(join(paseoHome, "agents"), { recursive: true });
@@ -201,7 +309,7 @@ Profile prompt.
 `,
     );
     const config = PaseoAgentConfigSchema.parse({
-      defaultProfile: "orchestrator",
+      defaultAgent: "orchestrator",
       defaultModel: "openrouter-main/a",
       providers: {
         "openrouter-main": {
@@ -219,7 +327,48 @@ Profile prompt.
     const session = await client.createSession(sessionConfig());
     try {
       const info = await session.getRuntimeInfo();
-      expect(info.model).toBe("openrouter-main/a");
+      expect(info.model).toBe("openrouter-main/b");
+    } finally {
+      await session.close();
+    }
+  });
+
+  it("uses the requested mode as the selected agent definition", async () => {
+    const paseoHome = mkdtempSync(join(tmpdir(), "paseo-agent-client-"));
+    tempDirs.push(paseoHome);
+    mkdirSync(join(paseoHome, "agents"), { recursive: true });
+    writeFileSync(join(paseoHome, "agents", "builder.md"), "---\nname: Builder\n---\nBuild.");
+    writeFileSync(
+      join(paseoHome, "agents", "reviewer.md"),
+      "---\nmodel: openrouter-main/b\n---\nReview.",
+    );
+    const config = PaseoAgentConfigSchema.parse({
+      defaultAgent: "builder",
+      providers: {
+        "openrouter-main": {
+          type: "openrouter",
+          options: {
+            baseUrl: "https://openrouter.ai/api/v1",
+            apiKey: "sk-test",
+            api: "openai-completions",
+            models: [{ id: "a" }, { id: "b" }],
+          },
+        },
+      },
+    });
+    const client = new PaseoAgentClient({ logger: createTestLogger(), config, paseoHome });
+
+    await expect(client.listModes({ cwd: process.cwd(), force: false })).resolves.toEqual([
+      { id: "builder", label: "Builder" },
+      { id: "reviewer", label: "reviewer" },
+    ]);
+
+    const session = await client.createSession(sessionConfig({ modeId: "reviewer" }));
+    try {
+      const info = await session.getRuntimeInfo();
+      expect(info.modeId).toBe("reviewer");
+      expect(info.model).toBe("openrouter-main/b");
+      await expect(session.getCurrentMode()).resolves.toBe("reviewer");
     } finally {
       await session.close();
     }
@@ -240,7 +389,7 @@ Profile prompt.
     const logger = createRecordingLogger();
     const client = new PaseoAgentClient({
       logger,
-      config: PaseoAgentConfigSchema.parse({ ...makeConfig(), defaultProfile: "orchestrator" }),
+      config: PaseoAgentConfigSchema.parse({ ...makeConfig(), defaultAgent: "orchestrator" }),
       paseoHome,
     });
     const session = await client.createSession(sessionConfig());
@@ -254,5 +403,146 @@ Profile prompt.
     } finally {
       await session.close();
     }
+  });
+});
+
+describe("PaseoAgentSession runtime events", () => {
+  it("runs through a representative Pi event sequence", async () => {
+    const { fakePi, session, events } = createPaseoProviderSession();
+    const resultPromise = session.run("hello");
+
+    await Promise.resolve();
+    fakePi.emit({ type: "agent_start" });
+    fakePi.emit({ type: "turn_start" });
+    fakePi.emit({
+      type: "message_update",
+      message: { role: "assistant", content: [] },
+      assistantMessageEvent: { type: "thinking_delta", delta: "thinking" },
+    });
+    fakePi.emit({
+      type: "tool_execution_start",
+      toolCallId: "tool-1",
+      toolName: "bash",
+      args: { command: "pwd" },
+    });
+    fakePi.emit({
+      type: "tool_execution_end",
+      toolCallId: "tool-1",
+      toolName: "bash",
+      result: { output: "/tmp" },
+      isError: false,
+    });
+    fakePi.emit({
+      type: "message_update",
+      message: { role: "assistant", content: [] },
+      assistantMessageEvent: { type: "text_delta", delta: "done" },
+    });
+    fakePi.emit({ type: "agent_end", messages: [], willRetry: false });
+    fakePi.promptDeferred.resolve();
+
+    await expect(resultPromise).resolves.toEqual({
+      sessionId: "pi-session-1",
+      finalText: "done",
+      usage: { inputTokens: 3, cachedInputTokens: 2, outputTokens: 5, totalCostUsd: 0.01 },
+      timeline: [
+        { type: "reasoning", text: "thinking" },
+        {
+          type: "tool_call",
+          callId: "tool-1",
+          name: "bash",
+          status: "running",
+          detail: { type: "shell", command: "pwd", output: undefined, exitCode: undefined },
+          error: null,
+        },
+        {
+          type: "tool_call",
+          callId: "tool-1",
+          name: "bash",
+          status: "completed",
+          detail: { type: "shell", command: "pwd", output: "/tmp", exitCode: null },
+          error: null,
+        },
+        { type: "assistant_message", text: "done" },
+      ],
+    });
+    expect(events.map((event) => event.type)).toEqual([
+      "thread_started",
+      "turn_started",
+      "timeline",
+      "timeline",
+      "timeline",
+      "timeline",
+      "turn_completed",
+    ]);
+  });
+
+  it("keeps the active turn open when Pi agent_end says it will retry", async () => {
+    const { fakePi, session, events } = createPaseoProviderSession();
+    const resultPromise = session.run("retry please");
+
+    await Promise.resolve();
+    fakePi.emit({
+      type: "message_update",
+      message: { role: "assistant", content: [] },
+      assistantMessageEvent: { type: "text_delta", delta: "first attempt " },
+    });
+    fakePi.agent.state.errorMessage = "transient overflow";
+    fakePi.emit({ type: "agent_end", messages: [], willRetry: true });
+    expect(events.some((event) => event.type === "turn_failed")).toBe(false);
+    expect(events.some((event) => event.type === "turn_completed")).toBe(false);
+
+    fakePi.agent.state.errorMessage = "";
+    fakePi.emit({
+      type: "message_update",
+      message: { role: "assistant", content: [] },
+      assistantMessageEvent: { type: "text_delta", delta: "retry success" },
+    });
+    fakePi.emit({ type: "agent_end", messages: [], willRetry: false });
+    fakePi.promptDeferred.resolve();
+
+    await expect(resultPromise).resolves.toMatchObject({
+      finalText: "first attempt retry success",
+    });
+    expect(events.filter((event) => event.type === "turn_completed")).toHaveLength(1);
+  });
+
+  it("maps interrupt aborts to clean turn cancellation", async () => {
+    const { fakePi, session, events } = createPaseoProviderSession();
+    const resultPromise = session.run("cancel me");
+
+    await Promise.resolve();
+    await session.interrupt();
+
+    await expect(resultPromise).resolves.toMatchObject({
+      sessionId: "pi-session-1",
+      finalText: "",
+      timeline: [],
+    });
+    expect(fakePi.abortCalls).toBe(1);
+    expect(events).toContainEqual({
+      type: "turn_canceled",
+      provider: "paseo",
+      turnId: expect.any(String),
+      reason: "interrupted",
+    });
+    expect(events.some((event) => event.type === "turn_failed")).toBe(false);
+  });
+
+  it("aborts an active turn before close and close is idempotent", async () => {
+    const { fakePi, session, events, mcpBridge } = createPaseoProviderSession();
+    await session.startTurn("close me");
+
+    await Promise.all([session.close(), session.close()]);
+
+    expect(fakePi.abortCalls).toBe(1);
+    expect(fakePi.disposeCalls).toBe(1);
+    expect(mcpBridge.closeCalls).toBe(1);
+    expect(events).toContainEqual({
+      type: "turn_canceled",
+      provider: "paseo",
+      turnId: expect.any(String),
+      reason: "interrupted",
+    });
+    expect(events.some((event) => event.type === "turn_failed")).toBe(false);
   });
 });

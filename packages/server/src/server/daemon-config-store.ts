@@ -62,19 +62,13 @@ function isEqualValue(a: unknown, b: unknown): boolean {
   return JSON.stringify(a) === JSON.stringify(b);
 }
 
-function stripDedicatedPaseoAgentConfig<T extends Record<string, unknown>>(config: T): T {
-  const agents = config.agents;
-  if (!isRecord(agents) || !Object.prototype.hasOwnProperty.call(agents, "paseo")) {
+function stripAgentProviderSecretConfig<T extends Record<string, unknown>>(config: T): T {
+  if (!Object.prototype.hasOwnProperty.call(config, "agents")) {
     return config;
   }
 
-  const { paseo: _paseo, ...remainingAgents } = agents;
   const next: Record<string, unknown> = { ...config };
-  if (Object.keys(remainingAgents).length > 0) {
-    next.agents = remainingAgents;
-  } else {
-    delete next.agents;
-  }
+  delete next.agents;
   return next as T;
 }
 
@@ -107,7 +101,7 @@ export class DaemonConfigStore {
   constructor(paseoHome: string, initial: MutableDaemonConfig, logger?: LoggerLike) {
     this.paseoHome = paseoHome;
     this.logger = getLogger(logger);
-    this.current = stripDedicatedPaseoAgentConfig(MutableDaemonConfigSchema.parse(initial));
+    this.current = stripAgentProviderSecretConfig(MutableDaemonConfigSchema.parse(initial));
   }
 
   public get(): MutableDaemonConfig {
@@ -115,10 +109,10 @@ export class DaemonConfigStore {
   }
 
   public patch(partial: MutableDaemonConfigPatch): MutableDaemonConfig {
-    const parsedPatch = stripDedicatedPaseoAgentConfig(
+    const parsedPatch = stripAgentProviderSecretConfig(
       MutableDaemonConfigPatchSchema.parse(partial),
     );
-    const next = stripDedicatedPaseoAgentConfig(
+    const next = stripAgentProviderSecretConfig(
       MutableDaemonConfigSchema.parse(deepMerge(this.current, parsedPatch)),
     );
 

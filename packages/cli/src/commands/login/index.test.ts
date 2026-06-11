@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { createCli } from "../../cli.js";
 import { createLoginCommand } from "./index.js";
@@ -152,6 +152,11 @@ describe("paseo login command", () => {
 
   it("rejects --device-code with --host instead of writing local auth for a remote host", async () => {
     const output: string[] = [];
+    const stderr: string[] = [];
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation((chunk) => {
+      stderr.push(String(chunk));
+      return true;
+    });
     const login = createLoginCommand({
       write: (message) => output.push(message),
       writeError: (message) => output.push(message),
@@ -172,14 +177,22 @@ describe("paseo login command", () => {
       },
     });
 
-    await login.parseAsync(["node", "login", "chatgpt", "--device-code", "--host", "remote:7777"]);
+    await expect(
+      login.parseAsync(["node", "login", "chatgpt", "--device-code", "--host", "remote:7777"]),
+    ).rejects.toThrow("process.exit unexpectedly called");
+    stderrSpy.mockRestore();
 
-    expect(output.join("\n")).toContain("--device-code cannot be combined with --host");
+    expect(stderr.join("\n")).toContain("--device-code cannot be combined with --host");
   });
 
   it("asks for a host update instead of sending credentials to an old daemon", async () => {
     const stored: unknown[] = [];
     const output: string[] = [];
+    const stderr: string[] = [];
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation((chunk) => {
+      stderr.push(String(chunk));
+      return true;
+    });
     const login = createLoginCommand({
       write: (message) => output.push(message),
       writeError: (message) => output.push(message),
@@ -209,10 +222,13 @@ describe("paseo login command", () => {
       },
     });
 
-    await login.parseAsync(["node", "login", "chatgpt", "--host", "remote:7777"]);
+    await expect(
+      login.parseAsync(["node", "login", "chatgpt", "--host", "remote:7777"]),
+    ).rejects.toThrow("process.exit unexpectedly called");
+    stderrSpy.mockRestore();
 
     expect(stored).toEqual([]);
-    expect(output.join("\n")).toContain("Update the host to configure Paseo Agent providers.");
+    expect(stderr.join("\n")).toContain("Update the host to configure Paseo Agent providers.");
   });
 
   it("does not echo password-bearing host URIs after remote login", async () => {

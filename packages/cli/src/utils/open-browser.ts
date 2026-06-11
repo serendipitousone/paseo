@@ -1,26 +1,46 @@
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+
+interface BrowserOpenCommand {
+  command: string;
+  args: string[];
+}
+
+type BrowserOpenSpawn = (
+  command: string,
+  args: string[],
+  options: { stdio: "ignore"; detached: true },
+) => Pick<ChildProcessWithoutNullStreams, "on" | "unref">;
+
+interface BrowserOpenDependencies {
+  platform?: NodeJS.Platform;
+  spawn?: BrowserOpenSpawn;
+}
 
 /**
  * Best-effort cross-platform browser opener for CLI OAuth flows. Returns true if the
  * opener process was spawned, false otherwise. Callers must always print the URL too,
  * so a failed/headless open still lets the user copy it.
  */
-function browserOpenCommand(url: string): { command: string; args: string[] } {
-  switch (process.platform) {
+export function browserOpenCommand(
+  url: string,
+  platform: NodeJS.Platform = process.platform,
+): BrowserOpenCommand {
+  switch (platform) {
     case "darwin":
       return { command: "open", args: [url] };
     case "win32":
-      return { command: "cmd", args: ["/c", "start", "", url] };
+      return { command: "rundll32.exe", args: ["url.dll,FileProtocolHandler", url] };
     default:
       return { command: "xdg-open", args: [url] };
   }
 }
 
-export function openBrowserUrl(url: string): boolean {
-  const { command, args } = browserOpenCommand(url);
+export function openBrowserUrl(url: string, dependencies: BrowserOpenDependencies = {}): boolean {
+  const spawnBrowser = dependencies.spawn ?? spawn;
+  const { command, args } = browserOpenCommand(url, dependencies.platform);
 
   try {
-    const child = spawn(command, args, { stdio: "ignore", detached: true });
+    const child = spawnBrowser(command, args, { stdio: "ignore", detached: true });
     child.on("error", () => {});
     child.unref();
     return true;

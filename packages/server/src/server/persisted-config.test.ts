@@ -171,6 +171,8 @@ describe("PersistedConfigSchema agent provider runtime settings", () => {
       agents: {
         paseo: {
           defaultModel: "openrouter-main/anthropic/claude",
+          defaultAgent: "builder",
+          defaultProfile: "orchestrator",
           providers: {
             "openrouter-main": {
               type: "openrouter",
@@ -187,6 +189,8 @@ describe("PersistedConfigSchema agent provider runtime settings", () => {
     });
 
     expect(parsed.agents?.paseo?.defaultModel).toBe("openrouter-main/anthropic/claude");
+    expect(parsed.agents?.paseo?.defaultAgent).toBe("builder");
+    expect(parsed.agents?.paseo?.defaultProfile).toBe("orchestrator");
     expect(parsed.agents?.paseo?.providers?.["openrouter-main"]?.type).toBe("openrouter");
   });
 });

@@ -27,18 +27,18 @@ Transports: HTTP (streamable) is the primary path (the injected `paseo` server i
 SSE and stdio transports are also wired via the MCP SDK. No extra config is needed — MCP
 servers come from Paseo's normal injection/config, not from `agents.paseo`.
 
-## Prompt profiles
+## Agent definitions
 
-Paseo Agent can load a Paseo-owned prompt profile from `$PASEO_HOME/agents/*.md`.
-Configure the default profile in `agents.paseo.defaultProfile`; `orchestrator` resolves
-to `$PASEO_HOME/agents/orchestrator.md`. Only top-level markdown files are profiles.
-Reusable fragments live under `$PASEO_HOME/agents/fragments/*.md`.
+Paseo Agent can load a Paseo-owned agent definition from `$PASEO_HOME/agents/*.md`.
+Configure the default agent in `agents.paseo.defaultAgent`; `orchestrator` resolves
+to `$PASEO_HOME/agents/orchestrator.md`. Only top-level markdown files are selectable
+agents. Reusable partials can live anywhere under `$PASEO_HOME/agents`.
 
 ```jsonc
 {
   "agents": {
     "paseo": {
-      "defaultProfile": "orchestrator",
+      "defaultAgent": "orchestrator",
       "defaultModel": "openrouter-main/anthropic/claude-3.7-sonnet",
       "providers": {},
     },
@@ -52,37 +52,48 @@ Example `$PASEO_HOME/agents/orchestrator.md`:
 ---
 name: Orchestrator
 description: Coordinates work through Paseo-managed agents
-mode: extend
-include:
-  - fragments/collaboration.md
+prompt: extend
 mcp: [paseo]
 model: openrouter-main/anthropic/claude-3.7-sonnet
+tools: [read, grep, paseo__list_agents, paseo__create_agent]
+permissions:
+  - tool: paseo__archive_*
+    action: deny
 ---
+
+!{{./partials/collaboration.md}}
 
 Use the Paseo MCP tools to inspect active agents, create focused helper agents, and
 summarize handoffs clearly.
 
-{{include: fragments/review-rules.md}}
+!{{./partials/review-rules.md}}
 ```
 
-`mode: extend` keeps Pi's default base prompt and prepends the composed profile body to
-the append list. `mode: override` uses the profile body as the custom base prompt, so
-Pi's default base prompt is skipped. In both modes, per-session `systemPrompt` is appended
-after the profile, and the daemon-level append prompt is appended last.
+`prompt: extend` keeps Pi's default base prompt and prepends the composed agent body to
+the append list. `prompt: override` uses the agent body as the custom base prompt, so
+Pi's default base prompt is skipped. In both prompt modes, per-session `systemPrompt` is
+appended after the agent, and the daemon-level append prompt is appended last.
 
-Frontmatter supports `name`, `description`, `mode`, `include`, `mcp`, `model`, and
-`projectContext`. `projectContext` is parsed for a future explicit project-context model,
-but it does not activate implicit `AGENTS.md`/`CLAUDE.md` discovery; Paseo Agent still
-keeps Pi context discovery off. `model` is only a lowest-precedence default: an explicit
-session model wins, then `agents.paseo.defaultModel`, then the profile model.
+Frontmatter supports `name`, `description`, `prompt`, `mcp`, `model`, `tools`,
+`permissions`, and `projectContext`. `projectContext` is parsed for a future explicit
+project-context model, but it does not activate implicit `AGENTS.md`/`CLAUDE.md`
+discovery; Paseo Agent still keeps Pi context discovery off. `model` is an agent default:
+an explicit session model wins, then the selected agent model, then
+`agents.paseo.defaultModel`, then Pi's first available model.
 
-Includes are deliberately confined to `$PASEO_HOME/agents`: absolute paths, `..` escapes,
-cycles, overly deep include chains, and oversized profiles are rejected. Frontmatter
-`include` entries are prepended in order; inline `{{include: fragments/foo.md}}` entries
-are expanded in place.
+Partials use bang braces and expand exactly where they appear: `!{{./partials/base.md}}`.
+Paths are relative to the file containing the directive and are confined to
+`$PASEO_HOME/agents`: absolute paths, directory escapes, cycles, overly deep partial
+chains, oversized definitions, and frontmatter inside partials are rejected.
+
+`tools` is the Pi tool allowlist for the agent: it controls what the model sees and can
+call. Omit it to use Pi's default built-in tools plus bridged MCP tools. `permissions` is
+an ordered first-match policy for active tool calls. The first matching `tool` pattern
+wins; unmatched tools are allowed. Denied calls are blocked before execution through Pi's
+tool preflight hook, so the policy applies to built-in, custom, and bridged MCP tools.
 
 `mcp: [paseo]` is an expectation check, not a new injection mechanism. The normal daemon
-MCP injection still supplies the actual server; if a profile declares an MCP server that
+MCP injection still supplies the actual server; if an agent declares an MCP server that
 is not present in the session's `mcpServers`, Paseo Agent logs a warning and continues.
 
 ## Config shape
@@ -97,6 +108,9 @@ is not present in the session's `mcpServers`, Paseo Agent logs a warning and con
 
       // Optional. Loads $PASEO_HOME/agents/orchestrator.md by default for new
       // Paseo Agent sessions.
+      "defaultAgent": "orchestrator",
+
+      // Legacy alias for defaultAgent. Still accepted for old configs.
       "defaultProfile": "orchestrator",
 
       // Inference providers, keyed by instance name. Names are free-form; you may

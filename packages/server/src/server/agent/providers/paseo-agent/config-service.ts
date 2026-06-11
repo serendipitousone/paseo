@@ -227,16 +227,6 @@ export class PaseoAgentConfigService {
     return removed;
   }
 
-  setDefaultModel(model: string | null): string | null {
-    const next = this.updateConfig((current) =>
-      PaseoAgentConfigSchema.parse({
-        ...current,
-        ...(model ? { defaultModel: model } : { defaultModel: undefined }),
-      }),
-    );
-    return next.defaultModel ?? null;
-  }
-
   storeChatGptCredential(providerName: string, credential: PaseoAgentOAuthCredential): void {
     storeCodexOAuthCredential({
       providerInstance: providerName,

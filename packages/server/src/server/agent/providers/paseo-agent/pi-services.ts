@@ -9,9 +9,10 @@ import {
   type ToolDefinition,
   createAgentSession,
 } from "@earendil-works/pi-coding-agent";
-import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
+import type { BeforeToolCallResult, ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { ImageContent, TextContent } from "@earendil-works/pi-ai";
 import { openaiCodexOAuthProvider } from "@earendil-works/pi-ai/oauth";
+import { evaluateToolPermission, type ToolPermissionPolicy } from "./agent-permissions.js";
 import type { PaseoComposedPrompt } from "./prompt-profiles.js";
 
 // Re-export the Pi tool contract so the MCP bridge can build custom tools without
@@ -87,7 +88,11 @@ export interface CreatePaseoAgentSessionOptions {
   settings?: PiSettings;
   /** Paseo-bridged tools (e.g. MCP) to register alongside built-in tools. */
   customTools?: ToolDefinition[];
-  /** Paseo-composed prompt profile/session/daemon instructions. */
+  /** Optional allowlist of active Pi tool names for this agent definition. */
+  tools?: string[];
+  /** Runtime allow/deny policy for every Pi tool call. */
+  permissionPolicy?: ToolPermissionPolicy;
+  /** Paseo-composed agent/session/daemon instructions. */
   composedPrompt?: PaseoComposedPrompt;
 }
 
@@ -141,6 +146,30 @@ function wrapPromptResourceLoader(
     ],
     extendResources: (paths) => delegate.extendResources(paths),
     reload: () => delegate.reload(),
+  };
+}
+
+function installPermissionPolicy(
+  session: PiAgentSession,
+  permissionPolicy: ToolPermissionPolicy | undefined,
+): void {
+  if (!permissionPolicy || permissionPolicy.rules.length === 0) {
+    return;
+  }
+
+  const previousBeforeToolCall = session.agent.beforeToolCall;
+  session.agent.beforeToolCall = async (
+    context,
+    signal,
+  ): Promise<BeforeToolCallResult | undefined> => {
+    const toolName = context.toolCall.name;
+    if (evaluateToolPermission(permissionPolicy, toolName) === "deny") {
+      return {
+        block: true,
+        reason: `Paseo Agent denied tool "${toolName}" by agent permissions.`,
+      };
+    }
+    return previousBeforeToolCall?.(context, signal);
   };
 }
 
@@ -208,14 +237,17 @@ export async function createPaseoAgentSession(
     ...(model ? { model } : {}),
     ...(options.thinkingLevel ? { thinkingLevel: options.thinkingLevel } : {}),
     ...(options.customTools ? { customTools: options.customTools } : {}),
+    ...(options.tools ? { tools: options.tools } : {}),
   });
 
   // Custom (MCP) tools are registered but not active by default — only the built-in
-  // tool set is. Activate them so the model can actually call them.
-  if (options.customTools && options.customTools.length > 0) {
+  // tool set is. Activate them unless an agent definition supplied an explicit tool allowlist.
+  if (!options.tools && options.customTools && options.customTools.length > 0) {
     const customToolNames = options.customTools.map((tool) => tool.name);
     session.setActiveToolsByName([...session.getActiveToolNames(), ...customToolNames]);
   }
+
+  installPermissionPolicy(session, options.permissionPolicy);
 
   return { session, modelRegistry, resourceLoader, sessionManager };
 }

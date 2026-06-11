@@ -122,7 +122,7 @@ describe("DaemonConfigStore", () => {
     });
   });
 
-  test("generic mutable config strips dedicated Paseo Agent config instead of echoing secrets", () => {
+  test("generic mutable config strips agent provider config instead of echoing secrets", () => {
     const paseoHome = mkdtempSync(path.join(tmpdir(), "paseo-daemon-config-store-"));
     tempDirs.push(paseoHome);
 
@@ -139,6 +139,13 @@ describe("DaemonConfigStore", () => {
 
     const secretBearingPatch: MutableDaemonConfigPatch & { agents: unknown } = {
       agents: {
+        providers: {
+          custom: {
+            env: {
+              API_KEY: "shared-provider-secret",
+            },
+          },
+        },
         paseo: {
           providers: {
             "openrouter-main": {
@@ -159,8 +166,11 @@ describe("DaemonConfigStore", () => {
     const broadcastJson = JSON.stringify(broadcasts);
     expect(returnedJson).not.toContain("sk-secret-openrouter");
     expect(returnedJson).not.toContain("header-secret");
+    expect(returnedJson).not.toContain("shared-provider-secret");
     expect(broadcastJson).not.toContain("sk-secret-openrouter");
     expect(broadcastJson).not.toContain("header-secret");
+    expect(broadcastJson).not.toContain("shared-provider-secret");
+    expect(loadPersistedConfig(paseoHome).agents?.providers).toBeUndefined();
     expect(loadPersistedConfig(paseoHome).agents?.paseo).toBeUndefined();
   });
 

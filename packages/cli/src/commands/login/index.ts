@@ -8,9 +8,16 @@ import {
 } from "@getpaseo/server";
 import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 
-import { addDaemonHostOption } from "../../utils/command-options.js";
+import { addJsonAndDaemonHostOptions } from "../../utils/command-options.js";
 import { connectToDaemon } from "../../utils/client.js";
 import { openBrowserUrl } from "../../utils/open-browser.js";
+import {
+  type CommandError,
+  type CommandOptions,
+  type OutputSchema,
+  type SingleResult,
+  withOutput,
+} from "../../output/index.js";
 
 // First-class auth UX: `paseo login chatgpt`.
 // Default flow is browser OAuth (PKCE + local callback on 127.0.0.1:1455) via Pi's
@@ -19,13 +26,15 @@ import { openBrowserUrl } from "../../utils/open-browser.js";
 
 const PROVIDER_INSTANCE = "chatgpt";
 
-interface LoginChatgptOptions {
+interface LoginChatgptOptions extends CommandOptions {
   deviceCode?: boolean;
   home?: string;
-  host?: string;
 }
 
 interface LoginResult {
+  provider: string;
+  mode: "browser" | "device-code";
+  target: string;
   path: string;
 }
 
@@ -49,8 +58,22 @@ const defaultDependencies: LoginCommandDependencies = {
   connectDaemon: connectToDaemon,
   openBrowser: openBrowserUrl,
   promptForCode,
-  write: (message) => console.log(message),
+  write: (message) => console.error(message),
   writeError: (message) => console.error(message),
+};
+
+const loginResultSchema: OutputSchema<LoginResult> = {
+  idField: "provider",
+  columns: [
+    { header: "PROVIDER", field: "provider", width: 12 },
+    { header: "MODE", field: "mode", width: 12 },
+    { header: "TARGET", field: "target", width: 44 },
+  ],
+  renderHuman: (result) => {
+    const data = result.data as LoginResult;
+    return `Logged in. Credential stored ${data.mode === "device-code" ? `at ${data.path}` : `on ${data.target}`} in Paseo-owned auth storage.`;
+  },
+  serialize: (data) => data,
 };
 
 function resolveEnv(home: string | undefined): NodeJS.ProcessEnv {
@@ -61,7 +84,10 @@ function requirePaseoAgentConfigFeature(client: Pick<DaemonClient, "getLastServe
   if (client.getLastServerInfoMessage()?.features?.paseoAgentConfig === true) {
     return;
   }
-  throw new Error("Update the host to configure Paseo Agent providers.");
+  throw {
+    code: "HOST_UPDATE_REQUIRED",
+    message: "Update the host to configure Paseo Agent providers.",
+  } satisfies CommandError;
 }
 
 function formatDaemonTarget(host: string | undefined): string {
@@ -99,14 +125,16 @@ function printDeviceCode(write: (message: string) => void, info: CodexDeviceCode
 async function runChatgptLogin(
   options: LoginChatgptOptions,
   dependencies: LoginCommandDependencies,
-): Promise<LoginResult> {
+): Promise<SingleResult<LoginResult>> {
   const env = resolveEnv(options.home);
   const { write } = dependencies;
 
   if (options.deviceCode && options.host) {
-    throw new Error(
-      "--device-code cannot be combined with --host yet. Use browser login for remote hosts.",
-    );
+    throw {
+      code: "INVALID_LOGIN_OPTIONS",
+      message:
+        "--device-code cannot be combined with --host yet. Use browser login for remote hosts.",
+    } satisfies CommandError;
   }
 
   if (options.deviceCode) {
@@ -116,10 +144,19 @@ async function runChatgptLogin(
       env,
       onDeviceCode: (info) => printDeviceCode(write, info),
     });
-    write(`\n✓ Logged in. Credential stored at ${path} (Paseo-owned, mode 0600).`);
-    return { path };
+    return {
+      type: "single",
+      data: {
+        provider: "chatgpt",
+        mode: "device-code",
+        target: path,
+        path,
+      },
+      schema: loginResultSchema,
+    };
   }
 
+  const target = formatDaemonTarget(options.host);
   const client = await dependencies.connectDaemon({ host: options.host });
   try {
     requirePaseoAgentConfigFeature(client);
@@ -144,35 +181,39 @@ async function runChatgptLogin(
       credential,
     });
     if (!result.success || result.error) {
-      throw new Error(result.error ?? "Daemon rejected the ChatGPT credential");
+      throw {
+        code: "LOGIN_REJECTED",
+        message: result.error ?? "Daemon rejected the ChatGPT credential",
+      } satisfies CommandError;
     }
+    write(`Credential accepted by ${target}.`);
   } finally {
     await client.close().catch(() => {});
   }
 
-  const target = formatDaemonTarget(options.host);
-  write(`\n✓ Logged in. Credential stored on ${target} in its Paseo-owned auth store.`);
-  return { path: target };
+  return {
+    type: "single",
+    data: {
+      provider: "chatgpt",
+      mode: "browser",
+      target,
+      path: target,
+    },
+    schema: loginResultSchema,
+  };
 }
 
 export function createLoginCommand(dependencies: Partial<LoginCommandDependencies> = {}): Command {
   const deps = { ...defaultDependencies, ...dependencies };
   const login = new Command("login").description("Authenticate Paseo providers");
 
-  addDaemonHostOption(
+  addJsonAndDaemonHostOptions(
     login
       .command("chatgpt")
       .description("Log in to ChatGPT/OpenAI (Codex subscription) for the Paseo Agent provider")
       .option("--device-code", "Use the headless device-code flow instead of the browser flow")
       .option("--home <path>", "Paseo home directory for local --device-code only"),
-  ).action(async (options: LoginChatgptOptions) => {
-    try {
-      await runChatgptLogin(options, deps);
-    } catch (error) {
-      deps.writeError(`Login failed: ${error instanceof Error ? error.message : String(error)}`);
-      process.exitCode = 1;
-    }
-  });
+  ).action(withOutput<LoginResult, []>((options, _command) => runChatgptLogin(options, deps)));
 
   return login;
 }

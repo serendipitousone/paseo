@@ -36,7 +36,7 @@ export function usePaseoAgentProviders(serverId: string | null): UsePaseoAgentPr
   const queryClient = useQueryClient();
   const client = useHostRuntimeClient(serverId ?? "");
   const isConnected = useHostRuntimeIsConnected(serverId ?? "");
-  // COMPAT(paseoAgentConfig): added in v0.1.X, drop the gate when floor >= v0.1.X.
+  // COMPAT(paseoAgentConfig): added in v0.1.85, remove gate after 2026-11-30.
   const supported = useSessionStore(
     (state) => state.sessions[serverId ?? ""]?.serverInfo?.features?.paseoAgentConfig === true,
   );
