@@ -58,6 +58,50 @@ npm run build:server           # highlight -> relay -> protocol -> client -> ser
 `build:server` is pure `tsc` compilation across the daemon workspaces — it does not require any
 dependency lifecycle script, which is why `ignore-scripts=true` is safe for it.
 
+## Daemon bundle (self-contained, for the offline/egress-restricted sandbox)
+
+The sandbox container downloads nothing, so we ship a self-contained, **daemon-only** bundle built
+from OUR source (never the registry). Output dir: `.twerk-bundle/` (git-ignored; regenerate, don't
+commit). Mechanism:
+
+```bash
+export PATH=/home/serendipity/.local/share/pi-node/node-v22.22.3-linux-x64/bin:$PATH
+cd /mnt/shared/cto/paseo
+# After Build procedure above (build:server done):
+mkdir -p .twerk-bundle/tarballs
+npm pack --ignore-scripts -w @getpaseo/highlight -w @getpaseo/relay -w @getpaseo/protocol \
+  -w @getpaseo/client -w @getpaseo/server -w @getpaseo/cli --pack-destination .twerk-bundle/tarballs
+# .twerk-bundle/app/package.json: depends on the cli tarball, with `overrides` forcing every
+# @getpaseo/* to its local file: tarball (guarantees OUR build, not registry copies).
+cd .twerk-bundle/app && npm install --omit=dev --ignore-scripts   # daemon prod closure only
+cp -a /home/serendipity/.local/share/pi-node/node-v22.22.3-linux-x64 ../node   # bundled runtime
+rm -rf ../node/lib/node_modules/@getpaseo ../node/lib/node_modules/@earendil-works ../node/lib/node_modules/pi*  # slim
+```
+
+Launch (`start-daemon.sh` in the bundle): runs `node app/node_modules/@getpaseo/server/dist/scripts/supervisor-entrypoint.js`
+off the bundled Node, honoring `PASEO_HOME` / `PASEO_LISTEN`.
+
+**Validated 2026-06-16 (tag v0.1.96):** boots in isolation on `127.0.0.1:6799`
+("Server listening", WS `/ws` up); the bundled `@getpaseo/server` dist sha matches our source
+build (`584d7d5c…`); closure contains `ws@8.21.0` and **no** app/Electron/Expo/Metro; size **~593 MB**
+(Node ~200 MB + daemon prod closure ~392 MB).
+
+### Two runtime out-bound behaviors to neutralize in the sandbox (the egress DROPs them)
+The boot test surfaced two defaults that dial out at startup — both must be turned off in the
+sandbox daemon's `$PASEO_HOME/config.json` (we reach the daemon via the Incus proxy / Direct path,
+and the persona is chat/web-search only):
+1. **Relay** — `daemon.relay.enabled` defaults `true`; the daemon dials `relay.paseo.sh`
+   (`relay_control_connected`). Set `daemon.relay.enabled: false`.
+2. **Local speech models** — voice/dictation default on, triggering a background download of
+   `parakeet-*` + `kokoro-*` into `$PASEO_HOME/models`. Disable `features.voiceMode.enabled` and
+   `features.dictation.enabled` (trims runtime egress and ~the speech model fetch).
+
+### Maps to `incus file push` (next step, #275 provisioning)
+Push `.twerk-bundle/{node,app,start-daemon.sh}` to a prefix in the container (e.g. `/opt/paseo/`),
+write a `config.json` with relay+voice disabled into the in-container `$PASEO_HOME`, and add an
+Incus **proxy device** forwarding the host/LAN port to the container's `PASEO_LISTEN`. `pi` is
+already baked into the sandbox for the daemon to spawn (`pi --mode rpc`).
+
 ## Upstream sync procedure
 
 ```bash
