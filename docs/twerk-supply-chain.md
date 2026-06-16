@@ -49,6 +49,7 @@ npm ci --ignore-scripts        # (redundant with .npmrc; kept explicit in CI)
 # 2. CVE + provenance scan — fail the build on a real finding, don't auto-fix.
 npm audit --audit-level=moderate
 npm audit signatures           # verifies registry signatures + provenance attestations
+osv-scanner scan source --lockfile=package-lock.json   # 2nd, registry-independent CVE check (OSV.dev)
 
 # 3. Build ONLY the daemon stack (no app / Electron / Expo).
 npm run build:server           # highlight -> relay -> protocol -> client -> server -> cli
@@ -72,11 +73,15 @@ Our divergence from upstream is intentionally thin (this doc + `.npmrc` today). 
 so syncs stay a clean review, and so functional forks (later #274 sub-issues) are isolated on
 their own `twerk/<feature>` branches.
 
+## Tooling
+
+- **`osv-scanner` v2.3.8** — **installed** at `~/.local/bin/osv-scanner`, the linux_amd64 release
+  binary verified against the release `osv-scanner_SHA256SUMS`
+  (`bc98e1…92dc`). Standalone Go binary, *not* an npm package, so it adds no npm supply-chain
+  surface. Runs as the second, registry-independent CVE check in the build procedure above.
+
 ## Recommended additions (not yet wired)
 
-- **`osv-scanner`** (Google, queries OSV.dev) as a second, registry-independent CVE check against
-  `package-lock.json`. It is a standalone Go binary, *not* an npm package, so it does not add npm
-  supply-chain surface — but installing tooling is a deliberate act, pending Bo's go-ahead.
 - **SBOM generation** (`npm sbom --sbom-format cyclonedx`) committed per release tag for audit trail.
 - **CI gate**: run the Build procedure + scans in GitHub Actions on every `twerk/*` push so the
   controls are enforced mechanically, not by memory.
@@ -104,12 +109,18 @@ NOT injection):**
 - Whole monorepo: 87 (6 low / 49 moderate / 26 high / 6 critical). **All 6 criticals are in the
   app / Electron / Expo / Metro / Cloudflare / eas-cli toolchain — none of which ships in the daemon.**
 - **Daemon production tree only** (`--omit=dev --workspace=@getpaseo/server --workspace=@getpaseo/cli`):
-  **17 (3 low / 7 moderate / 7 high / 0 critical).** Notable: **`ws`** (high — uninitialized memory
-  disclosure + fragment DoS, **non-breaking fix available**); `uuid` (<11.1.1, moderate, breaking);
-  `qs`/`express` (transitive).
-- Exploitability in context is low: the daemon is reached only by Bo's Paseo client over a Direct
-  Tailscale/LAN connection and is not internet-exposed. Triage deliberately; the `ws` non-breaking
-  bump is the recommended first fix on `twerk/main`.
+  **13 (3 low / 6 moderate / 4 high / 0 critical)** after the `ws` fix below — down from 17.
+  Remaining are moderate/low-exploitability in our context (`uuid` <11.1.1 moderate/breaking,
+  `qs`/`express`/`picomatch` transitive). Triage deliberately; no `audit fix --force`.
+- **Applied fix:** `ws` bumped **8.20.0 → 8.21.0** across the daemon (cleared GHSA-58qx /
+  GHSA-96hv highs). Done via `npm update ws --ignore-scripts --legacy-peer-deps` — within the
+  existing `^8.14.2` range, so package.json is unchanged; only the lockfile moved (0 top-level
+  packages removed, 35 deduped nested copies). The app-tree `ws@6/7` moved to patched 6.2.4 / 7.5.11.
+- Exploitability context: the daemon is reached only by Bo's Paseo client over a Direct
+  Tailscale/LAN connection and is not internet-exposed.
+
+**osv-scanner cross-check:** no daemon-path findings beyond the npm-audit set; the only residual
+`ws@8.18.0` finding is app-tree, not shipped in the daemon bundle.
 
 **Daemon build:** `npm run build:server` — compiles clean under `ignore-scripts=true` (pure `tsc`,
-no dependency script needed). _[confirm on each build]_
+no dependency script needed), re-verified after the `ws` bump.
